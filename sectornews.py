@@ -283,19 +283,20 @@ def fetch_all_news(state):
 def init_colors():
     curses.start_color()
     curses.use_default_colors()
-    curses.init_pair(C_HEADER,  curses.COLOR_CYAN,    -1)
-    curses.init_pair(C_POS,     curses.COLOR_GREEN,   -1)
-    curses.init_pair(C_NEG,     curses.COLOR_RED,     -1)
-    curses.init_pair(C_NEU,     curses.COLOR_YELLOW,  -1)
+    BG = curses.COLOR_BLACK
+    curses.init_pair(C_HEADER,  curses.COLOR_CYAN,    BG)
+    curses.init_pair(C_POS,     curses.COLOR_GREEN,   BG)
+    curses.init_pair(C_NEG,     curses.COLOR_RED,     BG)
+    curses.init_pair(C_NEU,     curses.COLOR_YELLOW,  BG)
     curses.init_pair(C_SEL,     curses.COLOR_BLACK,   curses.COLOR_CYAN)
-    curses.init_pair(C_DIM,     8,                    -1)
-    curses.init_pair(C_TITLE,   curses.COLOR_WHITE,   -1)
-    curses.init_pair(C_ACCENT,  curses.COLOR_CYAN,    -1)
-    curses.init_pair(C_BAR_POS, curses.COLOR_GREEN,   -1)
-    curses.init_pair(C_BAR_NEG, curses.COLOR_RED,     -1)
-    curses.init_pair(C_BAR_NEU, curses.COLOR_YELLOW,  -1)
-    curses.init_pair(C_BORDER,  8,                    -1)
-    curses.init_pair(C_LOADING, curses.COLOR_YELLOW,  -1)
+    curses.init_pair(C_DIM,     curses.COLOR_WHITE,   BG)   # muted white on black
+    curses.init_pair(C_TITLE,   curses.COLOR_WHITE,   BG)
+    curses.init_pair(C_ACCENT,  curses.COLOR_CYAN,    BG)
+    curses.init_pair(C_BAR_POS, curses.COLOR_GREEN,   BG)
+    curses.init_pair(C_BAR_NEG, curses.COLOR_RED,     BG)
+    curses.init_pair(C_BAR_NEU, curses.COLOR_YELLOW,  BG)
+    curses.init_pair(C_BORDER,  curses.COLOR_WHITE,   BG)
+    curses.init_pair(C_LOADING, curses.COLOR_YELLOW,  BG)
 
 def safe_addstr(win, y, x, text, attr=0):
     h, w = win.getmaxyx()
@@ -603,6 +604,8 @@ def main(stdscr):
     stdscr.nodelay(True)
     stdscr.timeout(200)
     init_colors()
+    # Force black background across entire screen
+    stdscr.bkgd(' ', curses.color_pair(C_TITLE))
 
     state = AppState()
 
