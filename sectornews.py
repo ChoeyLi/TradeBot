@@ -17,22 +17,43 @@ import json
 import re
 import os
 import sys
+import ssl
 from datetime import datetime, timezone
 from collections import defaultdict
+
+# Chrome User-Agent — same trick pftui uses to bypass feed restrictions
+_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+
+# SSL context (avoids macOS cert-store issues)
+_SSL_CTX = ssl.create_default_context()
+_SSL_CTX.check_hostname = False
+_SSL_CTX.verify_mode = ssl.CERT_NONE
 
 # ─── RSS FEEDS (free & public) ───────────────────────────────────────────────
 
 RSS_FEEDS = [
+    # Bloomberg (free public RSS)
+    ("Bloomberg",    "https://feeds.bloomberg.com/markets/news.rss"),
+    ("Bloomberg",    "https://feeds.bloomberg.com/economics/news.rss"),
+    ("Bloomberg",    "https://feeds.bloomberg.com/politics/news.rss"),
+    ("Bloomberg",    "https://feeds.bloomberg.com/commodities/news.rss"),
+    # Reuters
     ("Reuters",      "https://feeds.reuters.com/reuters/businessNews"),
     ("Reuters",      "https://feeds.reuters.com/reuters/technologyNews"),
-    ("MarketWatch",  "https://feeds.content.dowjones.io/public/rss/mw_realtimeheadlines"),
+    # AP
     ("AP",           "https://feeds.apnews.com/rss/apf-business"),
     ("AP",           "https://feeds.apnews.com/rss/apf-technology"),
-    ("Seeking Alpha","https://seekingalpha.com/feed.xml"),
+    # CNBC
     ("CNBC",         "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114"),
     ("CNBC",         "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=10001147"),
-    ("FT",           "https://www.ft.com/rss/home"),
+    # MarketWatch
+    ("MarketWatch",  "https://feeds.content.dowjones.io/public/rss/mw_realtimeheadlines"),
+    # Yahoo Finance
+    ("Yahoo",        "https://finance.yahoo.com/news/rssindex"),
+    # Investopedia
     ("Investopedia", "https://www.investopedia.com/feedbuilder/feed/getfeed/?feedName=rss_headline"),
+    # Seeking Alpha
+    ("Seeking Alpha","https://seekingalpha.com/feed.xml"),
 ]
 
 # ─── SECTOR CLASSIFICATION ───────────────────────────────────────────────────
@@ -104,19 +125,21 @@ SECTOR_ETFS = {
                     ("XLRE","Real Estate Select SPDR"),("REM","iShares Mortgage Real Est.")],
 }
 
-# ─── COLORS ───────────────────────────────────────────────────────────────────
+# ─── COLOR PAIRS ─────────────────────────────────────────────────────────────
 
-C_HEADER   = 1
-C_POS      = 2
-C_NEG      = 3
-C_NEU      = 4
-C_SEL      = 5
-C_DIM      = 6
-C_TITLE    = 7
-C_ACCENT   = 8
+C_HEADER   = 1   # cyan  — top bar brand
+C_POS      = 2   # green — bullish
+C_NEG      = 3   # red   — bearish
+C_NEU      = 4   # yellow— neutral
+C_SEL      = 5   # black on cyan — selected row
+C_DIM      = 6   # dark grey — secondary text
+C_TITLE    = 7   # bright white — main text
+C_ACCENT   = 8   # cyan — source names, tickers
 C_BAR_POS  = 9
 C_BAR_NEG  = 10
 C_BAR_NEU  = 11
+C_BORDER   = 12  # dark grey border
+C_LOADING  = 13  # yellow loading indicator
 
 # ─── APP STATE ────────────────────────────────────────────────────────────────
 
@@ -126,20 +149,27 @@ class AppState:
         self.loading     = True
         self.error       = None
         self.tab         = 0          # 0=News 1=Sectors 2=Watchlist 3=Chart
-        self.sel         = 0          # selected news row
-        self.scroll      = 0          # news scroll offset
+        self.sel         = 0
+        self.scroll      = 0
         self.etf_scroll  = 0
         self.last_update = None
+        self.feeds_ok    = 0
+        self.feeds_total = len(RSS_FEEDS)
         self.lock        = threading.Lock()
 
 # ─── RSS FETCH ────────────────────────────────────────────────────────────────
 
-def fetch_feed(source, url, timeout=8):
+def fetch_feed(source, url, timeout=10):
     try:
-        req = urllib.request.Request(url, headers={"User-Agent":"sectornews/1.0"})
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        req = urllib.request.Request(url, headers={
+            "User-Agent":      _UA,
+            "Accept":          "application/rss+xml, application/xml, text/xml, */*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Cache-Control":   "no-cache",
+        })
+        with urllib.request.urlopen(req, timeout=timeout, context=_SSL_CTX) as r:
             data = r.read()
-        root = ET.fromstring(data)
+        root  = ET.fromstring(data)
         items = root.findall(".//item") or root.findall(".//{http://www.w3.org/2005/Atom}entry")
         articles = []
         for item in items[:8]:
@@ -149,10 +179,10 @@ def fetch_feed(source, url, timeout=8):
             pub   = (item.findtext("pubDate") or
                      item.findtext("{http://www.w3.org/2005/Atom}published") or "")
             if title:
-                articles.append({"source": source, "title": title, "pub": pub, "url": url})
-        return articles
+                articles.append({"source": source, "title": title, "pub": pub})
+        return articles, True
     except Exception:
-        return []
+        return [], False
 
 def score_sentiment(text):
     t = text.lower()
@@ -207,10 +237,7 @@ def compute_sector_scores(news):
     scores = {}
     for sector in SECTOR_KEYWORDS:
         vals = sector_data.get(sector, [])
-        if vals:
-            scores[sector] = int(sum(vals) / len(vals))
-        else:
-            scores[sector] = 50
+        scores[sector] = int(sum(vals) / len(vals)) if vals else 50
     return dict(sorted(scores.items(), key=lambda x: -x[1]))
 
 def compute_etf_recommendations(sector_scores):
@@ -227,17 +254,29 @@ def compute_etf_recommendations(sector_scores):
     return sorted(recs, key=lambda x: -x["score"])
 
 def fetch_all_news(state):
-    all_articles = []
-    for source, url in RSS_FEEDS:
-        articles = fetch_feed(source, url)
-        for a in articles:
-            all_articles.append(enrich(a))
+    results = [[] for _ in RSS_FEEDS]
+    ok_flags = [False] * len(RSS_FEEDS)
+
+    def fetch_one(i, source, url):
+        articles, ok = fetch_feed(source, url)
+        results[i] = [enrich(a) for a in articles]
+        ok_flags[i] = ok
+
+    threads = [threading.Thread(target=fetch_one, args=(i, src, url), daemon=True)
+               for i, (src, url) in enumerate(RSS_FEEDS)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    all_articles = [a for batch in results for a in batch]
     all_articles.sort(key=lambda x: x.get("pub",""), reverse=True)
     with state.lock:
         state.news        = all_articles[:60]
         state.loading     = False
+        state.feeds_ok    = sum(ok_flags)
         state.last_update = datetime.now().strftime("%H:%M:%S")
-        state.error       = None if all_articles else "No articles loaded (check internet)"
+        state.error       = None if all_articles else "No articles loaded — check your internet connection"
 
 # ─── DRAWING ─────────────────────────────────────────────────────────────────
 
@@ -255,6 +294,8 @@ def init_colors():
     curses.init_pair(C_BAR_POS, curses.COLOR_GREEN,   -1)
     curses.init_pair(C_BAR_NEG, curses.COLOR_RED,     -1)
     curses.init_pair(C_BAR_NEU, curses.COLOR_YELLOW,  -1)
+    curses.init_pair(C_BORDER,  8,                    -1)
+    curses.init_pair(C_LOADING, curses.COLOR_YELLOW,  -1)
 
 def safe_addstr(win, y, x, text, attr=0):
     h, w = win.getmaxyx()
@@ -270,13 +311,15 @@ def safe_addstr(win, y, x, text, attr=0):
 
 def draw_topbar(win, state):
     h, w = win.getmaxyx()
-    bar = " sectornews  [1]News  [2]Sectors  [3]Watchlist  [4]Chart "
-    tabs = ["News","Sectors","Watchlist","Chart"]
-    win.attron(curses.color_pair(C_HEADER) | curses.A_BOLD)
+    tabs  = ["News","Sectors","Watchlist","Chart"]
+    # Fill bar background
+    win.attron(curses.color_pair(C_BORDER))
     win.hline(0, 0, " ", w)
-    safe_addstr(win, 0, 1, " sectornews ", curses.color_pair(C_HEADER) | curses.A_BOLD)
-    win.attroff(curses.color_pair(C_HEADER) | curses.A_BOLD)
-    col = 14
+    win.attroff(curses.color_pair(C_BORDER))
+    # Brand
+    safe_addstr(win, 0, 1, " TradeBot ", curses.color_pair(C_HEADER) | curses.A_BOLD)
+    safe_addstr(win, 0, 11, "▸", curses.color_pair(C_DIM))
+    col = 13
     for i, t in enumerate(tabs):
         label = f" [{i+1}]{t} "
         if i == state.tab:
@@ -284,22 +327,28 @@ def draw_topbar(win, state):
         else:
             safe_addstr(win, 0, col, label, curses.color_pair(C_DIM))
         col += len(label)
-    ts = f" {datetime.now().strftime('%H:%M:%S')} "
+    ts = datetime.now().strftime(" %H:%M:%S ")
     safe_addstr(win, 0, w - len(ts) - 1, ts, curses.color_pair(C_DIM))
 
 def draw_statusbar(win, state):
     h, w = win.getmaxyx()
-    if state.loading:
-        msg = " Fetching news feeds...  Press Q to quit"
-    elif state.error:
-        msg = f" {state.error}"
-    else:
-        upd = state.last_update or "?"
-        msg = f" [↑↓]navigate  [Enter]preview  [R]refresh  [Q]quit   Updated: {upd}  Sources: Reuters·AP·MarketWatch·CNBC·FT  (free RSS)"
-    win.attron(curses.color_pair(C_DIM))
+    win.attron(curses.color_pair(C_BORDER))
     win.hline(h-1, 0, " ", w)
-    safe_addstr(win, h-1, 0, msg[:w-1], curses.color_pair(C_DIM))
-    win.attroff(curses.color_pair(C_DIM))
+    win.attroff(curses.color_pair(C_BORDER))
+    if state.loading:
+        spinner = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+        sp = spinner[int(time.time() * 8) % len(spinner)]
+        msg = f" {sp} Fetching {state.feeds_total} feeds in parallel…  [Q] quit"
+        safe_addstr(win, h-1, 0, msg[:w-1], curses.color_pair(C_LOADING))
+    elif state.error:
+        safe_addstr(win, h-1, 0, f" ✗ {state.error}"[:w-1], curses.color_pair(C_NEG))
+    else:
+        upd  = state.last_update or "?"
+        msg  = (f" [↑↓] navigate  [R] refresh  [Q] quit"
+                f"   Updated {upd}  ·  {state.feeds_ok}/{state.feeds_total} feeds"
+                f"  ·  {len(state.news)} articles"
+                f"  ·  Bloomberg · Reuters · AP · CNBC · MarketWatch")
+        safe_addstr(win, h-1, 0, msg[:w-1], curses.color_pair(C_DIM))
 
 def signal_color(signal):
     if signal == "bullish": return curses.color_pair(C_POS)
@@ -311,236 +360,241 @@ def score_color(score):
     if score <= 40: return curses.color_pair(C_NEG)
     return curses.color_pair(C_NEU)
 
+# ─── TAB 1: NEWS ─────────────────────────────────────────────────────────────
+
 def draw_news(win, state):
-    h, w = win.getmaxyx()
-    news  = state.news
-    sel   = state.sel
-    scroll= state.scroll
-    content_h = h - 3
-    split = w * 2 // 3
+    h, w   = win.getmaxyx()
+    news   = state.news
+    sel    = state.sel
+    scroll = state.scroll
+    split  = w * 3 // 5
 
     # Column headers
-    safe_addstr(win, 1, 0, f"{'Age':<5} {'Source':<12} {'Signal':<9} {'Sector':<13} {'Headline'}", curses.color_pair(C_DIM) | curses.A_BOLD)
+    safe_addstr(win, 1, 1,
+        f"{'AGE':<5}  {'SOURCE':<13}  {'SIGNAL':<8}  {'SECTOR':<13}  HEADLINE",
+        curses.color_pair(C_DIM) | curses.A_BOLD)
     win.hline(2, 0, curses.ACS_HLINE, split - 1)
 
-    # News list
-    for i, article in enumerate(news[scroll: scroll + content_h - 2]):
+    content_h = h - 4
+    for i, article in enumerate(news[scroll: scroll + content_h]):
         row   = i + 3
         idx   = i + scroll
-        is_sel= (idx == sel)
-        age   = article.get("age","?")[:5]
-        src   = article.get("source","")[:11]
-        sig   = article.get("signal","neutral")[:8]
-        sect  = article.get("sector","")[:12]
-        title = article.get("title","")
+        is_sel = (idx == sel)
 
         if row >= h - 1:
             break
 
-        attr = curses.color_pair(C_SEL) if is_sel else 0
+        age  = article.get("age","?")[:5]
+        src  = article.get("source","")[:12]
+        sig  = article.get("signal","neutral")
+        sect = article.get("sector","")[:12]
+        title= article.get("title","")
+        avail= split - 44
+
         if is_sel:
             win.hline(row, 0, " ", split - 1)
-
-        safe_addstr(win, row, 0,  f"{age:<5}", attr | curses.color_pair(C_DIM) if not is_sel else curses.color_pair(C_SEL))
-        safe_addstr(win, row, 5,  f"{src:<12}", attr | curses.color_pair(C_ACCENT) if not is_sel else curses.color_pair(C_SEL))
-
-        sig_attr = signal_color(sig) if not is_sel else curses.color_pair(C_SEL)
-        safe_addstr(win, row, 17, f"{sig:<9}", sig_attr | curses.A_BOLD)
-
-        safe_addstr(win, row, 26, f"{sect:<13}", attr)
-
-        avail = split - 40
-        safe_addstr(win, row, 39, title[:avail], attr)
+            base = curses.color_pair(C_SEL)
+            safe_addstr(win, row, 1,  f"{age:<5}",   base)
+            safe_addstr(win, row, 8,  f"{src:<13}",  base)
+            safe_addstr(win, row, 22, f"{sig:<8}",   base | curses.A_BOLD)
+            safe_addstr(win, row, 31, f"{sect:<13}", base)
+            safe_addstr(win, row, 45, title[:avail], base)
+        else:
+            safe_addstr(win, row, 1,  f"{age:<5}",   curses.color_pair(C_DIM))
+            safe_addstr(win, row, 8,  f"{src:<13}",  curses.color_pair(C_ACCENT))
+            safe_addstr(win, row, 22, f"{sig:<8}",   signal_color(sig) | curses.A_BOLD)
+            safe_addstr(win, row, 31, f"{sect:<13}", curses.color_pair(C_TITLE))
+            safe_addstr(win, row, 45, title[:avail], curses.color_pair(C_TITLE))
 
     # Vertical divider
     for r in range(1, h-1):
         try:
-            win.addch(r, split, curses.ACS_VLINE, curses.color_pair(C_DIM))
+            win.addch(r, split, curses.ACS_VLINE, curses.color_pair(C_BORDER))
         except curses.error:
             pass
 
-    # Preview panel
-    safe_addstr(win, 1, split+2, "News Context", curses.color_pair(C_HEADER) | curses.A_BOLD)
+    # ── Detail panel ──
+    safe_addstr(win, 1, split+2, "DETAIL", curses.color_pair(C_HEADER) | curses.A_BOLD)
     win.hline(2, split+1, curses.ACS_HLINE, w - split - 2)
 
     if sel < len(news):
-        a    = news[sel]
-        title= a.get("title","")
-        sig  = a.get("signal","neutral")
-        score= a.get("sentiment", 50)
-        sect = a.get("sector","")
-        src  = a.get("source","")
-        age  = a.get("age","?")
-        etfs = SECTOR_ETFS.get(sect, [])[:4]
+        a     = news[sel]
+        title = a.get("title","")
+        sig   = a.get("signal","neutral")
+        score = a.get("sentiment", 50)
+        sect  = a.get("sector","")
+        src   = a.get("source","")
+        age   = a.get("age","?")
+        etfs  = SECTOR_ETFS.get(sect, [])[:4]
+        pw    = w - split - 3
+        prow  = 3
 
-        prow = 3
-        pw   = w - split - 3
-        # wrap title
-        words = title.split()
-        line  = ""
+        # Wrap headline
+        words, line = title.split(), ""
         for word in words:
             if len(line) + len(word) + 1 <= pw:
                 line += ("" if not line else " ") + word
             else:
                 if prow < h - 2:
-                    safe_addstr(win, prow, split+2, line, curses.color_pair(C_TITLE))
-                prow += 1
-                line = word
+                    safe_addstr(win, prow, split+2, line, curses.color_pair(C_TITLE) | curses.A_BOLD)
+                prow += 1; line = word
         if line and prow < h - 2:
-            safe_addstr(win, prow, split+2, line, curses.color_pair(C_TITLE))
+            safe_addstr(win, prow, split+2, line, curses.color_pair(C_TITLE) | curses.A_BOLD)
         prow += 2
 
-        def preview_row(label, val, val_attr=0):
+        def prow_write(label, val, val_attr=0):
             nonlocal prow
             if prow >= h - 2: return
             safe_addstr(win, prow, split+2, f"{label:<10}", curses.color_pair(C_DIM))
             safe_addstr(win, prow, split+12, val, val_attr or curses.color_pair(C_TITLE))
             prow += 1
 
-        preview_row("Source",  src)
-        preview_row("Sector",  sect, curses.color_pair(C_ACCENT))
-        preview_row("Signal",  sig.upper(), signal_color(sig) | curses.A_BOLD)
-        preview_row("Age",     age + " ago")
+        prow_write("Source",  src,                curses.color_pair(C_ACCENT))
+        prow_write("Sector",  sect,               curses.color_pair(C_ACCENT))
+        prow_write("Signal",  sig.upper(),        signal_color(sig) | curses.A_BOLD)
+        prow_write("Age",     age + " ago")
 
         # Sentiment bar
         if prow + 3 < h - 2:
             prow += 1
-            safe_addstr(win, prow, split+2, f"Sentiment  {score}/100", score_color(score) | curses.A_BOLD)
+            safe_addstr(win, prow, split+2,
+                f"Sentiment  {score}/100", score_color(score) | curses.A_BOLD)
             prow += 1
-            bar_w = min(pw - 2, 24)
+            bar_w  = min(pw - 2, 22)
             filled = int((score / 100) * bar_w)
-            bar = "█" * filled + "░" * (bar_w - filled)
-            safe_addstr(win, prow, split+2, bar, score_color(score))
+            safe_addstr(win, prow, split+2,
+                "█" * filled + "░" * (bar_w - filled), score_color(score))
             prow += 2
 
         # Related ETFs
         if etfs and prow + 2 < h - 2:
-            safe_addstr(win, prow, split+2, "Related ETFs", curses.color_pair(C_DIM))
+            safe_addstr(win, prow, split+2, "Related ETFs", curses.color_pair(C_DIM) | curses.A_BOLD)
             prow += 1
             for ticker, name in etfs:
                 if prow >= h - 2: break
-                safe_addstr(win, prow, split+2, f"  {ticker:<6}", curses.color_pair(C_POS) | curses.A_BOLD)
+                safe_addstr(win, prow, split+2, f" {ticker:<6}", curses.color_pair(C_POS) | curses.A_BOLD)
                 safe_addstr(win, prow, split+9, name[:pw-8], curses.color_pair(C_DIM))
                 prow += 1
 
-def draw_sectors(win, state):
-    h, w = win.getmaxyx()
-    news  = state.news
-    scores= compute_sector_scores(news)
+# ─── TAB 2: SECTORS ──────────────────────────────────────────────────────────
 
-    safe_addstr(win, 1, 2, "Sector Sentiment  (scored from live news signals)", curses.color_pair(C_HEADER) | curses.A_BOLD)
-    safe_addstr(win, 2, 2, "Score 0-100  |  Green >60 bullish  |  Yellow 40-60 neutral  |  Red <40 bearish", curses.color_pair(C_DIM))
+def draw_sectors(win, state):
+    h, w   = win.getmaxyx()
+    scores = compute_sector_scores(state.news)
+
+    safe_addstr(win, 1, 2, "SECTOR SENTIMENT", curses.color_pair(C_HEADER) | curses.A_BOLD)
+    safe_addstr(win, 1, 20, "scored from live news signals",curses.color_pair(C_DIM))
+    safe_addstr(win, 2, 2,
+        "Score 0-100  │  ≥60 bullish  │  40-60 neutral  │  ≤40 bearish",
+        curses.color_pair(C_DIM))
     win.hline(3, 0, curses.ACS_HLINE, w)
 
-    row = 4
-    bar_max = w - 30
+    row, bar_max = 4, w - 32
     for sector, score in scores.items():
-        if row >= h - 3:
-            break
-        label = f"{sector:<14}"
-        score_str = f"{score:>3}/100"
+        if row >= h - 3: break
         bar_w   = int((score / 100) * bar_max)
-        bar_fill= "█" * bar_w
-        bar_empty="░" * (bar_max - bar_w)
         scol    = score_color(score)
+        signal  = "▲ bullish" if score >= 60 else "▼ bearish" if score <= 40 else "● neutral"
+        sig_col = signal_color("bullish" if score >= 60 else "bearish" if score <= 40 else "neutral")
 
-        safe_addstr(win, row, 2, label, curses.color_pair(C_TITLE) | curses.A_BOLD)
-        safe_addstr(win, row, 17, score_str, scol | curses.A_BOLD)
-        safe_addstr(win, row, 25, bar_fill,  scol)
-        safe_addstr(win, row, 25+bar_w, bar_empty, curses.color_pair(C_DIM))
-
+        safe_addstr(win, row, 2,  f"{sector:<14}", curses.color_pair(C_TITLE) | curses.A_BOLD)
+        safe_addstr(win, row, 17, f"{score:>3}/100 ", scol | curses.A_BOLD)
+        safe_addstr(win, row, 25, "█" * bar_w,         scol)
+        safe_addstr(win, row, 25 + bar_w, "░" * (bar_max - bar_w), curses.color_pair(C_BORDER))
+        safe_addstr(win, row, 26 + bar_max, signal, sig_col)
         row += 1
-        # Show top 2 headlines for this sector
-        sector_news = [a for a in news if a.get("sector") == sector][:2]
+
+        # Top 2 headlines for this sector
+        sector_news = [a for a in state.news if a.get("sector") == sector][:2]
         for a in sector_news:
             if row >= h - 3: break
-            sig_sym = "+" if a["signal"]=="bullish" else "-" if a["signal"]=="bearish" else "~"
-            sig_col = signal_color(a["signal"])
-            safe_addstr(win, row, 4, sig_sym, sig_col | curses.A_BOLD)
-            safe_addstr(win, row, 6, a["title"][:w-10], curses.color_pair(C_DIM))
+            sym = "+" if a["signal"]=="bullish" else "-" if a["signal"]=="bearish" else "~"
+            safe_addstr(win, row, 4,  sym,                signal_color(a["signal"]) | curses.A_BOLD)
+            safe_addstr(win, row, 6,  a["source"][:10],   curses.color_pair(C_ACCENT))
+            safe_addstr(win, row, 17, a["title"][:w-19],  curses.color_pair(C_DIM))
             row += 1
         row += 1
 
+# ─── TAB 3: WATCHLIST ────────────────────────────────────────────────────────
+
 def draw_watchlist(win, state):
-    h, w = win.getmaxyx()
-    news  = state.news
-    scores= compute_sector_scores(news)
-    recs  = compute_etf_recommendations(scores)
+    h, w  = win.getmaxyx()
+    scores = compute_sector_scores(state.news)
+    recs   = compute_etf_recommendations(scores)
 
-    safe_addstr(win, 1, 2, "ETF Watchlist  (recommended from sector sentiment signals)", curses.color_pair(C_HEADER) | curses.A_BOLD)
-    safe_addstr(win, 2, 2, "Conviction 1.0-5.0  |  Based on news signal strength per sector", curses.color_pair(C_DIM))
-    win.hline(3, 0, curses.ACS_HLINE, w)
-    safe_addstr(win, 4, 2,  f"{'Ticker':<8}", curses.color_pair(C_DIM) | curses.A_BOLD)
-    safe_addstr(win, 4, 10, f"{'Name':<38}", curses.color_pair(C_DIM) | curses.A_BOLD)
-    safe_addstr(win, 4, 48, f"{'Sector':<14}", curses.color_pair(C_DIM) | curses.A_BOLD)
-    safe_addstr(win, 4, 62, f"{'Conv.':<7}", curses.color_pair(C_DIM) | curses.A_BOLD)
-    safe_addstr(win, 4, 69, "Signal", curses.color_pair(C_DIM) | curses.A_BOLD)
-    win.hline(5, 0, curses.ACS_HLINE, w)
+    safe_addstr(win, 1, 2, "ETF WATCHLIST", curses.color_pair(C_HEADER) | curses.A_BOLD)
+    safe_addstr(win, 1, 17, "conviction from news signal strength", curses.color_pair(C_DIM))
+    win.hline(2, 0, curses.ACS_HLINE, w)
+    safe_addstr(win, 3, 2,  f"{'TICKER':<8}", curses.color_pair(C_DIM) | curses.A_BOLD)
+    safe_addstr(win, 3, 11, f"{'NAME':<36}", curses.color_pair(C_DIM) | curses.A_BOLD)
+    safe_addstr(win, 3, 48, f"{'SECTOR':<14}", curses.color_pair(C_DIM) | curses.A_BOLD)
+    safe_addstr(win, 3, 63, f"{'CONV':<7}", curses.color_pair(C_DIM) | curses.A_BOLD)
+    safe_addstr(win, 3, 70, "SIGNAL", curses.color_pair(C_DIM) | curses.A_BOLD)
+    win.hline(4, 0, curses.ACS_HLINE, w)
 
-    scroll = state.etf_scroll
-    visible= recs[scroll: scroll + h - 8]
+    scroll  = state.etf_scroll
+    visible = recs[scroll: scroll + h - 7]
     for i, r in enumerate(visible):
-        row = 6 + i
+        row  = 5 + i
         if row >= h - 1: break
         score = r["score"]
         sent  = r["sentiment"]
         scol  = score_color(sent)
-        stars = "★" * int(round(score)) + "☆" * (5 - int(round(score)))
+        filled = int(round(score))
+        stars  = "★" * filled + "☆" * (5 - filled)
 
-        safe_addstr(win, row, 2,  r["ticker"],           curses.color_pair(C_ACCENT) | curses.A_BOLD)
-        safe_addstr(win, row, 10, r["name"][:37],        curses.color_pair(C_TITLE))
-        safe_addstr(win, row, 48, r["sector"][:13],      curses.color_pair(C_DIM))
-        safe_addstr(win, row, 62, f"{score:.1f}",        scol | curses.A_BOLD)
-        safe_addstr(win, row, 69, stars,                 scol)
+        safe_addstr(win, row, 2,  r["ticker"],         curses.color_pair(C_ACCENT) | curses.A_BOLD)
+        safe_addstr(win, row, 11, r["name"][:35],      curses.color_pair(C_TITLE))
+        safe_addstr(win, row, 48, r["sector"][:13],    curses.color_pair(C_DIM))
+        safe_addstr(win, row, 63, f"{score:.1f}",      scol | curses.A_BOLD)
+        safe_addstr(win, row, 70, stars,               scol)
+
+# ─── TAB 4: CHART ────────────────────────────────────────────────────────────
 
 def draw_chart(win, state):
-    h, w = win.getmaxyx()
-    news   = state.news
-    scores = compute_sector_scores(news)
+    h, w   = win.getmaxyx()
+    scores = compute_sector_scores(state.news)
+    recs   = compute_etf_recommendations(scores)[:8]
+    items  = list(scores.items())
 
-    safe_addstr(win, 1, 2, "Sector Sentiment Chart", curses.color_pair(C_HEADER) | curses.A_BOLD)
+    safe_addstr(win, 1, 2, "SECTOR CHART", curses.color_pair(C_HEADER) | curses.A_BOLD)
     win.hline(2, 0, curses.ACS_HLINE, w)
 
-    chart_h = (h - 5) // 2 - 1
-    chart_w = w - 20
-    max_val = 100
-    items   = list(scores.items())
-
-    # Bar chart
-    safe_addstr(win, 3, 2, "Sentiment scores by sector (bar chart)", curses.color_pair(C_DIM))
-    bar_unit = chart_w // max(len(items), 1)
+    # ── Vertical bar chart ──
+    chart_h  = min((h - 8) // 2, 12)
+    bar_unit = max(3, (w - 20) // max(len(items), 1))
+    safe_addstr(win, 3, 2, "Sentiment by sector", curses.color_pair(C_DIM))
 
     for i, (sector, score) in enumerate(items):
-        col = 2 + i * bar_unit
-        bar_h = int((score / max_val) * chart_h)
+        col   = 2 + i * bar_unit
+        bar_h = int((score / 100) * chart_h)
         scol  = score_color(score)
         for r in range(chart_h):
             row = 4 + chart_h - r
             if row < h - 1:
-                ch = "█" if r < bar_h else " "
-                attr = scol if r < bar_h else curses.color_pair(C_DIM)
-                for bc in range(min(bar_unit - 1, 6)):
-                    safe_addstr(win, row, col+bc, ch, attr)
+                ch   = "█" if r < bar_h else "░"
+                attr = scol if r < bar_h else curses.color_pair(C_BORDER)
+                for bc in range(min(bar_unit - 1, 7)):
+                    safe_addstr(win, row, col + bc, ch, attr)
         label = sector[:bar_unit-1]
-        safe_addstr(win, 4 + chart_h + 1, col, label, curses.color_pair(C_DIM))
-        safe_addstr(win, 4 + chart_h + 2, col, str(score), score_color(score) | curses.A_BOLD)
+        safe_addstr(win, 4 + chart_h + 1, col, label,       curses.color_pair(C_DIM))
+        safe_addstr(win, 4 + chart_h + 2, col, str(score),  score_color(score) | curses.A_BOLD)
 
-    # Horizontal divider between charts
-    div_row = 4 + chart_h + 3
-    if div_row < h - 4:
+    # ── ETF horizontal bars ──
+    div_row = 4 + chart_h + 4
+    if div_row < h - 3:
         win.hline(div_row, 0, curses.ACS_HLINE, w)
-        safe_addstr(win, div_row+1, 2, "ETF conviction scores", curses.color_pair(C_DIM))
-        recs = compute_etf_recommendations(scores)[:8]
-        bar_max = w - 30
+        safe_addstr(win, div_row + 1, 2, "ETF conviction scores", curses.color_pair(C_DIM))
+        bar_max = w - 32
         for j, r in enumerate(recs):
             row = div_row + 2 + j
             if row >= h - 1: break
-            score = r["score"]
+            bar_w = int((r["score"] / 5.0) * bar_max)
             scol  = score_color(r["sentiment"])
-            bar_w = int((score / 5.0) * bar_max)
             safe_addstr(win, row, 2,  f"{r['ticker']:<6}", curses.color_pair(C_ACCENT) | curses.A_BOLD)
-            safe_addstr(win, row, 9,  "█" * bar_w,         scol)
-            safe_addstr(win, row, 9+bar_w, f" {score:.1f}", scol | curses.A_BOLD)
+            safe_addstr(win, row, 9,  "█" * bar_w,          scol)
+            safe_addstr(win, row, 9 + bar_w, f"░" * (bar_max - bar_w), curses.color_pair(C_BORDER))
+            safe_addstr(win, row, 10 + bar_max, f" {r['score']:.1f}", scol | curses.A_BOLD)
 
 # ─── MAIN LOOP ────────────────────────────────────────────────────────────────
 
@@ -558,7 +612,7 @@ def main(stdscr):
     t = threading.Thread(target=bg_fetch, daemon=True)
     t.start()
 
-    last_tick = time.time()
+    last_refresh = time.time()
 
     while True:
         h, w = stdscr.getmaxyx()
@@ -567,8 +621,10 @@ def main(stdscr):
         with state.lock:
             draw_topbar(stdscr, state)
             if state.loading:
-                msg = "Fetching news feeds... please wait"
-                safe_addstr(stdscr, h//2, (w-len(msg))//2, msg, curses.color_pair(C_NEU) | curses.A_BOLD)
+                msg = "⠿ Fetching news feeds in parallel… please wait"
+                safe_addstr(stdscr, h//2,
+                    max(0, (w - len(msg)) // 2), msg,
+                    curses.color_pair(C_LOADING) | curses.A_BOLD)
             else:
                 if   state.tab == 0: draw_news(stdscr, state)
                 elif state.tab == 1: draw_sectors(stdscr, state)
@@ -577,16 +633,14 @@ def main(stdscr):
             draw_statusbar(stdscr, state)
 
         stdscr.refresh()
-
         key = stdscr.getch()
 
         if key in (ord('q'), ord('Q')):
             break
-
-        elif key in (ord('1'),): state.tab = 0
-        elif key in (ord('2'),): state.tab = 1
-        elif key in (ord('3'),): state.tab = 2
-        elif key in (ord('4'),): state.tab = 3
+        elif key == ord('1'): state.tab = 0
+        elif key == ord('2'): state.tab = 1
+        elif key == ord('3'): state.tab = 2
+        elif key == ord('4'): state.tab = 3
 
         elif key == curses.KEY_UP:
             if state.tab == 0:
@@ -598,28 +652,27 @@ def main(stdscr):
 
         elif key == curses.KEY_DOWN:
             if state.tab == 0:
-                state.sel = min(len(state.news)-1, state.sel + 1)
+                state.sel = min(max(0, len(state.news)-1), state.sel + 1)
                 if state.sel >= state.scroll + (h - 5):
                     state.scroll = state.sel - (h - 6)
             elif state.tab == 2:
                 state.etf_scroll += 1
 
         elif key in (ord('r'), ord('R')):
-            state.loading = True
-            state.news    = []
-            t2 = threading.Thread(target=bg_fetch, daemon=True)
-            t2.start()
+            if not state.loading:
+                state.loading = True
+                state.news    = []
+                threading.Thread(target=bg_fetch, daemon=True).start()
 
         # Auto-refresh every 5 minutes
-        if time.time() - last_tick > 300 and not state.loading:
-            last_tick = time.time()
+        if time.time() - last_refresh > 300 and not state.loading:
+            last_refresh = time.time()
             state.loading = True
-            t3 = threading.Thread(target=bg_fetch, daemon=True)
-            t3.start()
+            threading.Thread(target=bg_fetch, daemon=True).start()
 
 if __name__ == "__main__":
     try:
         curses.wrapper(main)
     except KeyboardInterrupt:
         pass
-    print("\nsectornews closed. Run again with: python3 sectornews.py\n")
+    print("\nTradeBot closed. Run again with: python3 sectornews.py\n")
