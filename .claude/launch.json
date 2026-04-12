@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "sectornews",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["sectornews_web.py"],
+      "port": 3000
+    }
+  ]
+}
