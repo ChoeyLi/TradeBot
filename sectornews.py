@@ -145,17 +145,18 @@ C_LOADING  = 13  # yellow loading indicator
 
 class AppState:
     def __init__(self):
-        self.news        = []
-        self.loading     = True
-        self.error       = None
-        self.tab         = 0          # 0=News 1=Sectors 2=Watchlist 3=Chart
-        self.sel         = 0
-        self.scroll      = 0
-        self.etf_scroll  = 0
-        self.last_update = None
-        self.feeds_ok    = 0
-        self.feeds_total = len(RSS_FEEDS)
-        self.lock        = threading.Lock()
+        self.news           = []
+        self.loading        = True
+        self.error          = None
+        self.tab            = 0          # 0=News 1=Sectors 2=Watchlist 3=Chart
+        self.sel            = 0
+        self.scroll         = 0
+        self.etf_scroll     = 0
+        self.last_update    = None
+        self.feeds_ok       = 0
+        self.feeds_total    = len(RSS_FEEDS)
+        self.sector_filter  = None       # set when user clicks a sector name
+        self.lock           = threading.Lock()
 
 # ─── RSS FETCH ────────────────────────────────────────────────────────────────
 
@@ -365,15 +366,21 @@ def score_color(score):
 
 def draw_news(win, state):
     h, w   = win.getmaxyx()
-    news   = state.news
+    # Apply sector filter if set
+    news   = [a for a in state.news if a.get("sector") == state.sector_filter] \
+             if state.sector_filter else state.news
     sel    = state.sel
     scroll = state.scroll
     split  = w * 3 // 5
 
     # Column headers
+    filter_label = f"  [filter: {state.sector_filter}  click sector to clear]" \
+                   if state.sector_filter else ""
     safe_addstr(win, 1, 1,
         f"{'AGE':<5}  {'SOURCE':<13}  {'SIGNAL':<8}  {'SECTOR':<13}  HEADLINE",
         curses.color_pair(C_DIM) | curses.A_BOLD)
+    safe_addstr(win, 1, split - len(filter_label) - 1,
+        filter_label, curses.color_pair(C_NEU) | curses.A_BOLD)
     win.hline(2, 0, curses.ACS_HLINE, split - 1)
 
     content_h = h - 4
@@ -479,12 +486,18 @@ def draw_news(win, state):
 
 # ─── TAB 2: SECTORS ──────────────────────────────────────────────────────────
 
+# Maps terminal row → sector name; rebuilt every draw cycle
+_sector_row_map = {}
+
 def draw_sectors(win, state):
+    global _sector_row_map
+    _sector_row_map = {}
     h, w   = win.getmaxyx()
     scores = compute_sector_scores(state.news)
 
     safe_addstr(win, 1, 2, "SECTOR SENTIMENT", curses.color_pair(C_HEADER) | curses.A_BOLD)
-    safe_addstr(win, 1, 20, "scored from live news signals",curses.color_pair(C_DIM))
+    safe_addstr(win, 1, 20, "scored from live news signals  [click a sector to filter News tab]",
+                curses.color_pair(C_DIM))
     safe_addstr(win, 2, 2,
         "Score 0-100  │  ≥60 bullish  │  40-60 neutral  │  ≤40 bearish",
         curses.color_pair(C_DIM))
@@ -497,8 +510,14 @@ def draw_sectors(win, state):
         scol    = score_color(score)
         signal  = "▲ bullish" if score >= 60 else "▼ bearish" if score <= 40 else "● neutral"
         sig_col = signal_color("bullish" if score >= 60 else "bearish" if score <= 40 else "neutral")
+        is_active = (state.sector_filter == sector)
 
-        safe_addstr(win, row, 2,  f"{sector:<14}", curses.color_pair(C_TITLE) | curses.A_BOLD)
+        _sector_row_map[row] = sector  # register clickable row
+
+        # Highlight the active/selected sector
+        name_attr = (curses.color_pair(C_SEL) | curses.A_BOLD) if is_active \
+                    else (curses.color_pair(C_TITLE) | curses.A_BOLD)
+        safe_addstr(win, row, 2,  f"{sector:<14}", name_attr)
         safe_addstr(win, row, 17, f"{score:>3}/100 ", scol | curses.A_BOLD)
         safe_addstr(win, row, 25, "█" * bar_w,         scol)
         safe_addstr(win, row, 25 + bar_w, "░" * (bar_max - bar_w), curses.color_pair(C_BORDER))
@@ -606,6 +625,8 @@ def main(stdscr):
     init_colors()
     # Force black background across entire screen
     stdscr.bkgd(' ', curses.color_pair(C_TITLE))
+    # Enable mouse clicks
+    curses.mousemask(curses.ALL_MOUSE_EVENTS | curses.REPORT_MOUSE_POSITION)
 
     state = AppState()
 
@@ -644,6 +665,42 @@ def main(stdscr):
         elif key == ord('2'): state.tab = 1
         elif key == ord('3'): state.tab = 2
         elif key == ord('4'): state.tab = 3
+
+        elif key == curses.KEY_MOUSE:
+            try:
+                _, mx, my, _, bstate = curses.getmouse()
+                if bstate & curses.BUTTON1_CLICKED or bstate & curses.BUTTON1_PRESSED:
+                    # ── Top bar tab clicks ──
+                    if my == 0:
+                        tabs_start = [13, 21, 31, 43]  # approx col positions
+                        for i, col in enumerate(tabs_start):
+                            if mx >= col and (i == len(tabs_start)-1 or mx < tabs_start[i+1]+2):
+                                state.tab = i
+                                break
+
+                    # ── News tab: click a row to select it ──
+                    elif state.tab == 0 and my >= 3:
+                        news_shown = [a for a in state.news
+                                      if a.get("sector") == state.sector_filter] \
+                                     if state.sector_filter else state.news
+                        idx = state.scroll + (my - 3)
+                        if 0 <= idx < len(news_shown):
+                            state.sel = idx
+
+                    # ── Sectors tab: click a sector row to filter News ──
+                    elif state.tab == 1:
+                        sector = _sector_row_map.get(my)
+                        if sector:
+                            # Toggle: clicking active filter clears it
+                            if state.sector_filter == sector:
+                                state.sector_filter = None
+                            else:
+                                state.sector_filter = sector
+                                state.sel    = 0
+                                state.scroll = 0
+                                state.tab    = 0   # jump to News tab filtered
+            except curses.error:
+                pass
 
         elif key == curses.KEY_UP:
             if state.tab == 0:
