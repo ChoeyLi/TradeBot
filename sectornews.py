@@ -18,6 +18,7 @@ import re
 import os
 import sys
 import ssl
+import math
 from datetime import datetime, timezone
 from collections import defaultdict
 
@@ -87,19 +88,77 @@ SECTOR_KEYWORDS = {
                     "interest rate","affordability","30-year"],
 }
 
-# ─── SENTIMENT KEYWORDS ───────────────────────────────────────────────────────
+# ─── THEME CLASSIFICATION ────────────────────────────────────────────────────
+# High-level category visible in the News tab (like pftui's "Category" column)
 
+THEME_KEYWORDS = {
+    "geopolitics": ["war","military","nato","weapon","missile","drone","sanction",
+                    "ceasefire","treaty","diplomacy","invasion","strike","nuclear",
+                    "geopolit","alliance","tariff","trade war","taiwan","coup",
+                    "iran","ukraine","russia","north korea","middle east","pentagon",
+                    "arms","rebel","blockade","protest","unrest","tensions"],
+    "macro":       ["fed","federal reserve","central bank","rate cut","rate hike",
+                    "rate pause","inflation","cpi","pce","gdp","recession","stagflation",
+                    "employment","unemployment","jobs","fiscal","deficit","imf",
+                    "world bank","ecb","boe","boj","monetary policy","stimulus",
+                    "quantitative","yield curve","debt ceiling","treasury yield"],
+    "crypto":      ["bitcoin","btc","ethereum","eth","crypto","blockchain","defi",
+                    "nft","stablecoin","altcoin","token","mining","solana","xrp",
+                    "usdc","usdt","binance","coinbase","web3","dao"],
+    "markets":     ["stock","equity","s&p","nasdaq","dow","ipo","merger","acquisition",
+                    "earnings","revenue","dividend","buyback","index","etf","fund",
+                    "portfolio","analyst","upgrade","downgrade","price target","shares",
+                    "rally","selloff","volatility","options","futures"],
+}
+
+def classify_theme(text):
+    t = text.lower()
+    best, best_n = "markets", 0   # default
+    for theme, kws in THEME_KEYWORDS.items():
+        n = sum(1 for kw in kws if kw in t)
+        if n > best_n:
+            best, best_n = theme, n
+    return best
+
+# ─── SENTIMENT KEYWORDS ───────────────────────────────────────────────────────
+# Phrase-based scoring: multi-word patterns score ×2 so context beats single words
+# "cut" removed from neg single-words — "rate cut" is a phrase that scores bullish
+
+BULLISH_PHRASES = [
+    "rate cut","rate cuts","cuts rate","cut rates","lower rates","rate reduction",
+    "ceasefire","peace deal","peace talks","trade deal","deal reached","sanctions lifted",
+    "record high","all-time high","beats expectations","beat expectations",
+    "earnings beat","better than expected","profit rises","profit surges",
+    "dovish","stimulus","quantitative easing","debt deal","budget deal",
+    "job creation","jobs added","unemployment falls","unemployment drops",
+    "approved","approval granted","fda approved","merger approved",
+    "rebound","recovery","upgrade","breakout","strategic reserve",
+]
+BEARISH_PHRASES = [
+    "rate hike","rate hikes","hikes rate","raises rates","rate increase",
+    "hawkish","quantitative tightening","emergency rate",
+    "earnings miss","misses expectations","miss expectations","worse than expected",
+    "profit warning","guidance cut","revenue miss","write-down",
+    "bank failure","bank run","credit downgrade","debt default","sovereign default",
+    "recession fears","recession risk","recession warning","depression",
+    "war escalates","escalation","invades","invasion","military strike",
+    "job losses","mass layoffs","unemployment rises","unemployment surges",
+    "sanctions imposed","sanctions expanded","trade war escalates",
+    "debt crisis","financial crisis","market crash","flash crash",
+]
 POSITIVE_WORDS = [
     "surge","soar","rise","gain","rally","jump","climb","boost","record","high",
     "growth","profit","beat","strong","bullish","upside","expand","recovery",
     "approve","buy","upgrade","positive","optimism","acceleration","demand",
     "breakthrough","secure","win","deal","partnership","increase","thrive",
+    "rebound","stabilize","confidence","resolution","agreement","eases",
 ]
 NEGATIVE_WORDS = [
     "fall","drop","slump","crash","plunge","decline","loss","miss","weak",
-    "bearish","risk","warn","collapse","fail","cut","downgrade","uncertainty",
+    "bearish","risk","warn","collapse","fail","downgrade","uncertainty",
     "concern","threat","tension","conflict","tariff","sanction","ban","restrict",
-    "recession","contraction","default","debt","crisis","investigation","probe",
+    "recession","contraction","default","crisis","investigation","probe",
+    "selloff","panic","fear","instability","tumble","sink","slide",
 ]
 
 # ─── ETF RECOMMENDATIONS ─────────────────────────────────────────────────────
@@ -125,6 +184,34 @@ SECTOR_ETFS = {
                     ("XLRE","Real Estate Select SPDR"),("REM","iShares Mortgage Real Est.")],
 }
 
+# ─── MARKET DATA SYMBOLS ─────────────────────────────────────────────────────
+# (display, full name, yahoo_ticker, category)
+MKT_SYMBOLS = [
+    ("SPX",    "S&P 500",              "^GSPC",    "equity"),
+    ("NDX",    "Nasdaq 100",           "^NDX",     "equity"),
+    ("DJI",    "Dow Jones",            "^DJI",     "equity"),
+    ("RUT",    "Russell 2000",         "^RUT",     "equity"),
+    ("VIX",    "CBOE Volatility",      "^VIX",     "equity"),
+    ("Gold",   "Gold Futures",         "GC=F",     "commodity"),
+    ("Silver", "Silver Futures",       "SI=F",     "commodity"),
+    ("Oil",    "Crude Oil (WTI)",      "CL=F",     "commodity"),
+    ("NatGas", "Natural Gas",          "NG=F",     "commodity"),
+    ("BTC",    "Bitcoin",              "BTC-USD",  "crypto"),
+    ("ETH",    "Ethereum",             "ETH-USD",  "crypto"),
+    ("SOL",    "Solana",               "SOL-USD",  "crypto"),
+    ("DXY",    "Dollar Index",         "DX-Y.NYB", "forex"),
+    ("EUR",    "Euro / USD",           "EURUSD=X", "forex"),
+    ("GBP",    "Pound / USD",          "GBPUSD=X", "forex"),
+    ("JPY",    "USD / Yen",            "JPY=X",    "forex"),
+    ("10Y",    "10-Year Treasury",     "^TNX",     "fund"),
+    ("2Y",     "2-Year Treasury",      "^FVX",     "fund"),
+    ("HYG",    "High Yield Bond ETF",  "HYG",      "fund"),
+    ("LQD",    "Inv Grade Bond ETF",   "LQD",      "fund"),
+]
+
+# Persistent history file for sentiment snapshots
+HIST_FILE = os.path.expanduser("~/.sectornews_history.json")
+
 # ─── COLOR PAIRS ─────────────────────────────────────────────────────────────
 
 C_HEADER   = 1   # cyan  — top bar brand
@@ -140,6 +227,11 @@ C_BAR_NEG  = 10
 C_BAR_NEU  = 11
 C_BORDER   = 12  # dark grey border
 C_LOADING  = 13  # yellow loading indicator
+C_TRUMP    = 14  # magenta — Trump headlines
+C_GEOPOL   = 15  # red — geopolitics theme
+C_MACRO    = 16  # yellow — macro theme
+C_CRYPTO   = 17  # cyan — crypto theme
+C_MKTS     = 18  # white — markets theme
 
 # ─── APP STATE ────────────────────────────────────────────────────────────────
 
@@ -148,7 +240,7 @@ class AppState:
         self.news           = []
         self.loading        = True
         self.error          = None
-        self.tab            = 0          # 0=News 1=Sectors 2=Watchlist 3=Chart
+        self.tab            = 0          # 0=News 1=Sectors 2=Mkt 3=Watchlist 4=Chart
         self.sel            = 0
         self.scroll         = 0
         self.etf_scroll     = 0
@@ -156,6 +248,11 @@ class AppState:
         self.feeds_ok       = 0
         self.feeds_total    = len(RSS_FEEDS)
         self.sector_filter  = None       # set when user clicks a sector name
+        self.mkt_data        = []   # list of market quote dicts
+        self.mkt_loading     = False
+        self.mkt_last_update = None
+        self.polymarket      = []   # finance-relevant prediction markets
+        self.history         = []   # last 3 sentiment snapshots (30-min cadence)
         self.lock           = threading.Lock()
 
 # ─── RSS FETCH ────────────────────────────────────────────────────────────────
@@ -187,12 +284,15 @@ def fetch_feed(source, url, timeout=10):
 
 def score_sentiment(text):
     t = text.lower()
-    pos = sum(1 for w in POSITIVE_WORDS if w in t)
-    neg = sum(1 for w in NEGATIVE_WORDS if w in t)
+    # Phrases count double to beat ambiguous single words (e.g. "rate cut" > "cut")
+    pos = sum(2 for ph in BULLISH_PHRASES if ph in t)
+    neg = sum(2 for ph in BEARISH_PHRASES if ph in t)
+    pos += sum(1 for w in POSITIVE_WORDS if w in t)
+    neg += sum(1 for w in NEGATIVE_WORDS if w in t)
     total = pos + neg
     if total == 0:
         return 50
-    return int((pos / total) * 100)
+    return max(0, min(100, int((pos / total) * 100)))
 
 def classify_sector(text):
     t = text.lower()
@@ -206,6 +306,7 @@ def enrich(article):
     text = article["title"]
     article["sentiment"] = score_sentiment(text)
     article["sector"]    = classify_sector(text)
+    article["theme"]     = classify_theme(text)
     article["age"]       = format_age(article.get("pub",""))
     article["signal"]    = ("bullish" if article["sentiment"] >= 60
                             else "bearish" if article["sentiment"] <= 40
@@ -231,14 +332,37 @@ def format_age(pub_str):
             pass
     return "?"
 
+def _age_secs(age_str):
+    """Parse '2m' / '3h' / '1d' into seconds."""
+    try:
+        if age_str.endswith('s'): return int(age_str[:-1])
+        if age_str.endswith('m'): return int(age_str[:-1]) * 60
+        if age_str.endswith('h'): return int(age_str[:-1]) * 3600
+        if age_str.endswith('d'): return int(age_str[:-1]) * 86400
+    except Exception:
+        pass
+    return 86400
+
 def compute_sector_scores(news):
+    """Recency-weighted sentiment average.
+    Weights: <2 h = 3, 2–12 h = 2, older = 1.
+    Requires ≥2 articles to move off 50; single-article sectors return raw score.
+    """
     sector_data = defaultdict(list)
     for a in news:
-        sector_data[a["sector"]].append(a["sentiment"])
+        secs = _age_secs(a.get("age", "1d"))
+        w = 3 if secs <= 7200 else (2 if secs <= 43200 else 1)
+        sector_data[a["sector"]].append((a["sentiment"], w))
     scores = {}
     for sector in SECTOR_KEYWORDS:
-        vals = sector_data.get(sector, [])
-        scores[sector] = int(sum(vals) / len(vals)) if vals else 50
+        items = sector_data.get(sector, [])
+        if not items:
+            scores[sector] = 50
+        elif len(items) == 1:
+            scores[sector] = items[0][0]
+        else:
+            total_w = sum(w for _, w in items)
+            scores[sector] = int(sum(s * w for s, w in items) / total_w)
     return dict(sorted(scores.items(), key=lambda x: -x[1]))
 
 def compute_etf_recommendations(sector_scores):
@@ -279,6 +403,196 @@ def fetch_all_news(state):
         state.last_update = datetime.now().strftime("%H:%M:%S")
         state.error       = None if all_articles else "No articles loaded — check your internet connection"
 
+# ─── MARKET DATA FETCH ───────────────────────────────────────────────────────
+# Uses Yahoo Finance /v8/finance/chart per-symbol (more reliable than batch quote)
+
+import http.cookiejar as _cookiejar
+
+def _make_yf_opener():
+    """Build an opener that persists Yahoo session cookies."""
+    cj  = _cookiejar.CookieJar()
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPSHandler(context=_SSL_CTX),
+        urllib.request.HTTPCookieProcessor(cj),
+    )
+    opener.addheaders = [
+        ("User-Agent",      _UA),
+        ("Accept",          "application/json, text/javascript, */*"),
+        ("Accept-Language", "en-US,en;q=0.9"),
+        ("Referer",         "https://finance.yahoo.com/"),
+    ]
+    return opener
+
+def _fetch_chart(opener, ticker, retries=2):
+    """Fetch 5-day daily OHLC from Yahoo chart endpoint (no auth needed)."""
+    sym_enc = urllib.request.quote(ticker)
+    url = (f"https://query1.finance.yahoo.com/v8/finance/chart/{sym_enc}"
+           "?interval=1d&range=5d")
+    for attempt in range(retries):
+        try:
+            resp = opener.open(url, timeout=10)
+            d    = json.loads(resp.read())
+            res  = d["chart"]["result"][0]
+            meta = res["meta"]
+            closes = [c for c in res["indicators"]["quote"][0].get("close", []) if c]
+            price  = meta.get("regularMarketPrice")
+            prev   = meta.get("chartPreviousClose") or (closes[-2] if len(closes) >= 2 else None)
+            chg    = ((price - prev) / prev * 100) if price and prev else None
+            return price, chg, closes
+        except Exception:
+            if attempt < retries - 1:
+                time.sleep(0.5)
+    return None, None, []
+
+def fetch_mkt_data(state):
+    """Fetch live quotes via Yahoo Finance chart endpoint (per-symbol, no API key)."""
+    with state.lock:
+        state.mkt_loading = True
+
+    opener = _make_yf_opener()
+    rows   = [None] * len(MKT_SYMBOLS)
+
+    def _fetch_one(i, display, name, ticker, cat):
+        price, chg, closes = _fetch_chart(opener, ticker)
+        rows[i] = {
+            "symbol":   display, "name": name,
+            "ticker":   ticker,  "category": cat,
+            "price":    price,   "chg_pct": chg,
+            "closes":   closes,  # last 5 closes for sparkline
+        }
+
+    # Parallel fetch with small stagger to avoid hitting rate-limits
+    threads = []
+    for i, sym in enumerate(MKT_SYMBOLS):
+        t = threading.Thread(target=_fetch_one, args=(i, *sym), daemon=True)
+        threads.append(t)
+        t.start()
+        time.sleep(0.05)   # 50 ms stagger
+
+    for t in threads:
+        t.join(timeout=15)
+
+    # Fill any None slots (thread timeout)
+    for i, sym in enumerate(MKT_SYMBOLS):
+        if rows[i] is None:
+            rows[i] = {"symbol": sym[0], "name": sym[1], "ticker": sym[2],
+                       "category": sym[3], "price": None, "chg_pct": None, "closes": []}
+
+    with state.lock:
+        state.mkt_data        = rows
+        state.mkt_loading     = False
+        state.mkt_last_update = datetime.now().strftime("%H:%M:%S")
+
+# ─── POLYMARKET PREDICTION MARKETS ──────────────────────────────────────────
+
+_POLY_KWS = [
+    "fed","rate cut","rate hike","interest rate","recession","gdp","inflation","cpi",
+    "tariff","dollar","gold","oil","nasdaq","s&p","crypto","bitcoin","btc","eth",
+    "ethereum","economy","debt","treasury","iran","ukraine","war","ceasefire","trump",
+    "china","trade","powell","fiscal","deficit","opec","brent","wti",
+]
+
+def fetch_polymarket(state):
+    """Fetch finance/macro prediction markets from Polymarket (public API)."""
+    url = ("https://gamma-api.polymarket.com/markets"
+           "?limit=200&closed=false&order=volume&ascending=false")
+    try:
+        req = urllib.request.Request(url, headers={
+            "User-Agent": _UA, "Accept": "application/json",
+        })
+        with urllib.request.urlopen(req, timeout=12, context=_SSL_CTX) as r:
+            data = json.loads(r.read())
+
+        hits = []
+        for m in data:
+            q = (m.get("question") or "").lower()
+            if not any(kw in q for kw in _POLY_KWS):
+                continue
+            prices_raw   = m.get("outcomePrices", "[]")
+            outcomes_raw = m.get("outcomes", "[]")
+            try:
+                prices   = json.loads(prices_raw)   if isinstance(prices_raw, str)   else prices_raw
+                outcomes = json.loads(outcomes_raw) if isinstance(outcomes_raw, str) else outcomes_raw
+                p0 = float(prices[0]) * 100 if prices else 50.0
+            except Exception:
+                p0, outcomes = 50.0, ["Yes", "No"]
+            chg_raw = m.get("oneHourPriceChange")
+            try:
+                chg_1h = float(chg_raw) * 100 if chg_raw else None
+            except Exception:
+                chg_1h = None
+            hits.append({
+                "question": m.get("question", "")[:90],
+                "prob":     p0,
+                "outcomes": outcomes[:2],
+                "chg_1h":   chg_1h,
+                "volume":   m.get("volumeNum") or 0,
+            })
+
+        hits.sort(key=lambda x: -x["volume"])
+        with state.lock:
+            state.polymarket = hits[:20]
+    except Exception:
+        pass
+
+# ─── HISTORY (sentiment snapshots for sparklines / correlation) ───────────────
+
+def load_history(state):
+    """Load last 3 snapshots; handles both old dict and new list format."""
+    try:
+        if os.path.exists(HIST_FILE):
+            with open(HIST_FILE) as f:
+                raw = json.load(f)
+            if isinstance(raw, dict):
+                raw = raw.get("hourly", [])   # migrate old dual-res format
+            state.history = raw[-3:]
+    except Exception:
+        state.history = []
+
+def save_snapshot(state):
+    """Save a snapshot every 30 min; keep only the last 3."""
+    scores = compute_sector_scores(state.news)
+    if not scores:
+        return
+    now = datetime.now()
+    if state.history:
+        try:
+            last_dt = datetime.fromisoformat(state.history[-1]["ts"])
+            if (now - last_dt).total_seconds() < 1800:   # 30 min throttle
+                return
+        except Exception:
+            pass
+    state.history.append({"ts": now.isoformat(), "scores": scores})
+    state.history = state.history[-3:]   # rolling window of 3
+    try:
+        with open(HIST_FILE, "w") as f:
+            json.dump(state.history, f)
+    except Exception:
+        pass
+
+def combined_timeline(state):
+    return state.history   # simple list now
+
+def compute_correlations(timeline, sectors):
+    """Pearson correlation matrix over a flat list of {ts, scores} snapshots."""
+    n = len(timeline)
+    if n < 3:
+        return None
+    series = {s: [h["scores"].get(s, 50) for h in timeline] for s in sectors}
+    corr   = {}
+    for s1 in sectors:
+        for s2 in sectors:
+            if s1 == s2:
+                corr[(s1, s2)] = 1.0
+                continue
+            x, y   = series[s1], series[s2]
+            mx, my = sum(x) / n, sum(y) / n
+            num    = sum((xi - mx) * (yi - my) for xi, yi in zip(x, y))
+            dx     = math.sqrt(sum((xi - mx) ** 2 for xi in x))
+            dy     = math.sqrt(sum((yi - my) ** 2 for yi in y))
+            corr[(s1, s2)] = (num / (dx * dy)) if dx and dy else 0.0
+    return corr
+
 # ─── DRAWING ─────────────────────────────────────────────────────────────────
 
 def init_colors():
@@ -298,6 +612,11 @@ def init_colors():
     curses.init_pair(C_BAR_NEU, curses.COLOR_YELLOW,  BG)
     curses.init_pair(C_BORDER,  curses.COLOR_WHITE,   BG)
     curses.init_pair(C_LOADING, curses.COLOR_YELLOW,  BG)
+    curses.init_pair(C_TRUMP,   curses.COLOR_MAGENTA, BG)
+    curses.init_pair(C_GEOPOL,  curses.COLOR_RED,     BG)
+    curses.init_pair(C_MACRO,   curses.COLOR_YELLOW,  BG)
+    curses.init_pair(C_CRYPTO,  curses.COLOR_CYAN,    BG)
+    curses.init_pair(C_MKTS,    curses.COLOR_WHITE,   BG)
 
 def safe_addstr(win, y, x, text, attr=0):
     h, w = win.getmaxyx()
@@ -313,7 +632,7 @@ def safe_addstr(win, y, x, text, attr=0):
 
 def draw_topbar(win, state):
     h, w = win.getmaxyx()
-    tabs  = ["News","Sectors","Watchlist","Chart"]
+    tabs  = ["News","Sectors","Mkt","Watchlist","Chart"]
     # Fill bar background
     win.attron(curses.color_pair(C_BORDER))
     win.hline(0, 0, " ", w)
@@ -362,6 +681,14 @@ def score_color(score):
     if score <= 40: return curses.color_pair(C_NEG)
     return curses.color_pair(C_NEU)
 
+def theme_color(theme):
+    return {
+        "geopolitics": curses.color_pair(C_GEOPOL),
+        "macro":       curses.color_pair(C_MACRO),
+        "crypto":      curses.color_pair(C_CRYPTO),
+        "markets":     curses.color_pair(C_MKTS),
+    }.get(theme, curses.color_pair(C_DIM))
+
 # ─── TAB 1: NEWS ─────────────────────────────────────────────────────────────
 
 def draw_news(win, state):
@@ -373,11 +700,12 @@ def draw_news(win, state):
     scroll = state.scroll
     split  = w * 3 // 5
 
-    # Column headers
+    # Column layout:  AGE(5) SOURCE(12) SIGNAL(8) THEME(12) HEADLINE(rest)
+    # col offsets:    1      8          21        30        43
     filter_label = f"  [filter: {state.sector_filter}  click sector to clear]" \
                    if state.sector_filter else ""
     safe_addstr(win, 1, 1,
-        f"{'AGE':<5}  {'SOURCE':<13}  {'SIGNAL':<8}  {'SECTOR':<13}  HEADLINE",
+        f"{'AGE':<5}  {'SOURCE':<12}  {'SIGNAL':<8}  {'THEME':<12}  HEADLINE",
         curses.color_pair(C_DIM) | curses.A_BOLD)
     safe_addstr(win, 1, split - len(filter_label) - 1,
         filter_label, curses.color_pair(C_NEU) | curses.A_BOLD)
@@ -385,34 +713,37 @@ def draw_news(win, state):
 
     content_h = h - 4
     for i, article in enumerate(news[scroll: scroll + content_h]):
-        row   = i + 3
-        idx   = i + scroll
+        row    = i + 3
+        idx    = i + scroll
         is_sel = (idx == sel)
 
         if row >= h - 1:
             break
 
-        age  = article.get("age","?")[:5]
-        src  = article.get("source","")[:12]
-        sig  = article.get("signal","neutral")
-        sect = article.get("sector","")[:12]
-        title= article.get("title","")
-        avail= split - 44
+        age   = article.get("age","?")[:5]
+        src   = article.get("source","")[:11]
+        sig   = article.get("signal","neutral")
+        theme = article.get("theme","markets")[:11]
+        title = article.get("title","")
+        avail = split - 44
+        is_trump = "trump" in title.lower()
 
         if is_sel:
             win.hline(row, 0, " ", split - 1)
             base = curses.color_pair(C_SEL)
-            safe_addstr(win, row, 1,  f"{age:<5}",   base)
-            safe_addstr(win, row, 8,  f"{src:<13}",  base)
-            safe_addstr(win, row, 22, f"{sig:<8}",   base | curses.A_BOLD)
-            safe_addstr(win, row, 31, f"{sect:<13}", base)
-            safe_addstr(win, row, 45, title[:avail], base)
+            safe_addstr(win, row, 1,  f"{age:<5}",    base)
+            safe_addstr(win, row, 8,  f"{src:<12}",   base)
+            safe_addstr(win, row, 21, f"{sig:<8}",    base | curses.A_BOLD)
+            safe_addstr(win, row, 30, f"{theme:<12}", base)
+            safe_addstr(win, row, 43, title[:avail],  base)
         else:
-            safe_addstr(win, row, 1,  f"{age:<5}",   curses.color_pair(C_DIM))
-            safe_addstr(win, row, 8,  f"{src:<13}",  curses.color_pair(C_ACCENT))
-            safe_addstr(win, row, 22, f"{sig:<8}",   signal_color(sig) | curses.A_BOLD)
-            safe_addstr(win, row, 31, f"{sect:<13}", curses.color_pair(C_TITLE))
-            safe_addstr(win, row, 45, title[:avail], curses.color_pair(C_TITLE))
+            title_attr = (curses.color_pair(C_TRUMP) | curses.A_BOLD
+                          if is_trump else curses.color_pair(C_TITLE))
+            safe_addstr(win, row, 1,  f"{age:<5}",    curses.color_pair(C_DIM))
+            safe_addstr(win, row, 8,  f"{src:<12}",   curses.color_pair(C_ACCENT))
+            safe_addstr(win, row, 21, f"{sig:<8}",    signal_color(sig) | curses.A_BOLD)
+            safe_addstr(win, row, 30, f"{theme:<12}", theme_color(theme) | curses.A_BOLD)
+            safe_addstr(win, row, 43, title[:avail],  title_attr)
 
     # Vertical divider
     for r in range(1, h-1):
@@ -496,11 +827,16 @@ def draw_sectors(win, state):
     scores = compute_sector_scores(state.news)
 
     safe_addstr(win, 1, 2, "SECTOR SENTIMENT", curses.color_pair(C_HEADER) | curses.A_BOLD)
-    safe_addstr(win, 1, 20, "scored from live news signals  [click a sector to filter News tab]",
+    safe_addstr(win, 1, 20, "recency-weighted sentiment  [click a sector to filter News tab]",
                 curses.color_pair(C_DIM))
     safe_addstr(win, 2, 2,
-        "Score 0-100  │  ≥60 bullish  │  40-60 neutral  │  ≤40 bearish",
+        "Score 0-100  │  ≥60 ",
         curses.color_pair(C_DIM))
+    safe_addstr(win, 2, 23, "bullish", curses.color_pair(C_POS) | curses.A_BOLD)
+    safe_addstr(win, 2, 31, "  │  40-60 ", curses.color_pair(C_DIM))
+    safe_addstr(win, 2, 42, "neutral", curses.color_pair(C_NEU) | curses.A_BOLD)
+    safe_addstr(win, 2, 50, "  │  ≤40 ", curses.color_pair(C_DIM))
+    safe_addstr(win, 2, 59, "bearish", curses.color_pair(C_NEG) | curses.A_BOLD)
     win.hline(3, 0, curses.ACS_HLINE, w)
 
     row, bar_max = 4, w - 32
@@ -535,7 +871,134 @@ def draw_sectors(win, state):
             row += 1
         row += 1
 
-# ─── TAB 3: WATCHLIST ────────────────────────────────────────────────────────
+# ─── TAB 3: MKT ──────────────────────────────────────────────────────────────
+
+_CAT_COLORS = {
+    "equity":    curses.COLOR_GREEN,
+    "commodity": curses.COLOR_YELLOW,
+    "crypto":    curses.COLOR_CYAN,
+    "forex":     curses.COLOR_WHITE,
+    "fund":      curses.COLOR_WHITE,
+}
+
+def draw_mkt(win, state):
+    h, w = win.getmaxyx()
+    safe_addstr(win, 1, 2, "MARKET OVERVIEW", curses.color_pair(C_HEADER) | curses.A_BOLD)
+    ts_str = f"updated {state.mkt_last_update}" if state.mkt_last_update else "press [R] to load"
+    safe_addstr(win, 1, 19, f"{ts_str}  ·  [R] refresh", curses.color_pair(C_DIM))
+
+    # ── Left panel: market quotes ──
+    split  = min(75, w * 3 // 5)
+    spark_col = 74   # 5D sparkline starts here (if terminal wide enough)
+
+    safe_addstr(win, 2, 2,  f"{'SYM':<8}",   curses.color_pair(C_DIM) | curses.A_BOLD)
+    safe_addstr(win, 2, 11, f"{'NAME':<22}",  curses.color_pair(C_DIM) | curses.A_BOLD)
+    safe_addstr(win, 2, 34, f"{'CAT':<10}",   curses.color_pair(C_DIM) | curses.A_BOLD)
+    safe_addstr(win, 2, 45, f"{'PRICE':>12}", curses.color_pair(C_DIM) | curses.A_BOLD)
+    safe_addstr(win, 2, 58, f"{'DAY%':>8}",   curses.color_pair(C_DIM) | curses.A_BOLD)
+    if w > spark_col + 5:
+        safe_addstr(win, 2, spark_col, "5D", curses.color_pair(C_DIM) | curses.A_BOLD)
+    win.hline(3, 0, curses.ACS_HLINE, w)
+
+    if state.mkt_loading:
+        msg = "⠿ Fetching market quotes via Yahoo Finance…"
+        safe_addstr(win, h // 2, max(0, (w - len(msg)) // 2), msg,
+                    curses.color_pair(C_LOADING) | curses.A_BOLD)
+        return
+    if not state.mkt_data:
+        msg = "No market data — press [R] to fetch"
+        safe_addstr(win, h // 2, max(0, (w - len(msg)) // 2), msg,
+                    curses.color_pair(C_DIM))
+        return
+
+    row = 4
+    for item in state.mkt_data:
+        if row >= h - 1:
+            break
+        sym   = item["symbol"]
+        name  = item["name"]
+        cat   = item["category"]
+        price = item["price"]
+        chg   = item["chg_pct"]
+        closes = item.get("closes", [])
+
+        if chg is None:
+            chg_col = curses.color_pair(C_DIM);  chg_str = "     ---"
+        elif chg > 0:
+            chg_col = curses.color_pair(C_POS);  chg_str = f"+{chg:.2f}%"
+        elif chg < 0:
+            chg_col = curses.color_pair(C_NEG);  chg_str = f"{chg:.2f}%"
+        else:
+            chg_col = curses.color_pair(C_NEU);  chg_str = f" {chg:.2f}%"
+
+        cat_attr = {
+            "equity":    curses.color_pair(C_POS),
+            "commodity": curses.color_pair(C_NEU),
+            "crypto":    curses.color_pair(C_ACCENT),
+            "forex":     curses.color_pair(C_DIM),
+            "fund":      curses.color_pair(C_DIM),
+        }.get(cat, curses.color_pair(C_TITLE))
+
+        price_str = f"{price:,.2f}" if price is not None else "---"
+
+        safe_addstr(win, row, 2,  f"{sym:<8}",       cat_attr | curses.A_BOLD)
+        safe_addstr(win, row, 11, f"{name:<22}",      curses.color_pair(C_TITLE))
+        safe_addstr(win, row, 34, f"{cat:<10}",       curses.color_pair(C_DIM))
+        safe_addstr(win, row, 45, f"{price_str:>12}", curses.color_pair(C_TITLE))
+        safe_addstr(win, row, 58, f"{chg_str:>8}",    chg_col | curses.A_BOLD)
+
+        # 5-day sparkline from close prices
+        if w > spark_col + 5 and len(closes) >= 2:
+            mn, mx = min(closes), max(closes)
+            rng    = mx - mn or 1
+            spark  = "".join(_SPARK[max(0, min(8, int((c - mn) / rng * 8.99)))]
+                             for c in closes)
+            safe_addstr(win, row, spark_col, spark, chg_col)
+
+        row += 1
+
+    # ── Polymarket prediction markets panel ──
+    if not state.polymarket:
+        return
+
+    div_row = row + 1
+    if div_row >= h - 4:
+        return
+    win.hline(div_row, 0, curses.ACS_HLINE, w)
+    safe_addstr(win, div_row + 1, 2, "PREDICTION MARKETS",
+                curses.color_pair(C_HEADER) | curses.A_BOLD)
+    safe_addstr(win, div_row + 1, 22, "via Polymarket (public)",
+                curses.color_pair(C_DIM))
+    safe_addstr(win, div_row + 2, 2,  f"{'PROB':>6}", curses.color_pair(C_DIM) | curses.A_BOLD)
+    safe_addstr(win, div_row + 2, 10, f"{'1H Δ':>6}",  curses.color_pair(C_DIM) | curses.A_BOLD)
+    safe_addstr(win, div_row + 2, 18, "QUESTION",        curses.color_pair(C_DIM) | curses.A_BOLD)
+    prow = div_row + 3
+    for pm in state.polymarket:
+        if prow >= h - 1:
+            break
+        prob  = pm["prob"]
+        chg1h = pm["chg_1h"]
+        q_str = pm["question"][:w - 20]
+
+        if prob >= 60:   p_col = curses.color_pair(C_POS)
+        elif prob <= 40: p_col = curses.color_pair(C_NEG)
+        else:            p_col = curses.color_pair(C_NEU)
+
+        if chg1h is None:
+            c_str = "    ---";  c_col = curses.color_pair(C_DIM)
+        elif chg1h > 0:
+            c_str = f"+{chg1h:.1f}%"; c_col = curses.color_pair(C_POS)
+        elif chg1h < 0:
+            c_str = f"{chg1h:.1f}%";  c_col = curses.color_pair(C_NEG)
+        else:
+            c_str = " 0.0%";           c_col = curses.color_pair(C_NEU)
+
+        safe_addstr(win, prow, 2,  f"{prob:5.1f}%",  p_col | curses.A_BOLD)
+        safe_addstr(win, prow, 10, f"{c_str:>6}",    c_col)
+        safe_addstr(win, prow, 18, q_str,             curses.color_pair(C_TITLE))
+        prow += 1
+
+# ─── TAB 4: WATCHLIST ────────────────────────────────────────────────────────
 
 def draw_watchlist(win, state):
     h, w  = win.getmaxyx()
@@ -569,52 +1032,158 @@ def draw_watchlist(win, state):
         safe_addstr(win, row, 63, f"{score:.1f}",      scol | curses.A_BOLD)
         safe_addstr(win, row, 70, stars,               scol)
 
-# ─── TAB 4: CHART ────────────────────────────────────────────────────────────
+# ─── TAB 5: CHART ────────────────────────────────────────────────────────────
+
+_SPARK = " ▁▂▃▄▅▆▇█"   # 9 levels (index 0–8)
+
+def _spark_char(val):
+    return _SPARK[max(0, min(8, int(val / 100 * 8.99)))]
 
 def draw_chart(win, state):
     h, w   = win.getmaxyx()
     scores = compute_sector_scores(state.news)
     recs   = compute_etf_recommendations(scores)[:8]
     items  = list(scores.items())
+    sectors = list(SECTOR_KEYWORDS.keys())
 
+    n_snaps   = len(state.history)
+    snap_info = f"{n_snaps}/3 snapshots · every 30 min"
     safe_addstr(win, 1, 2, "SECTOR CHART", curses.color_pair(C_HEADER) | curses.A_BOLD)
+    safe_addstr(win, 1, 16, f"  ({snap_info})", curses.color_pair(C_DIM))
     win.hline(2, 0, curses.ACS_HLINE, w)
 
-    # ── Vertical bar chart ──
-    chart_h  = min((h - 8) // 2, 12)
-    bar_unit = max(3, (w - 20) // max(len(items), 1))
-    safe_addstr(win, 3, 2, "Sentiment by sector", curses.color_pair(C_DIM))
+    # ── [A] Scatter / line plot of current sentiment ──
+    plot_h   = min((h - 8) // 3, 12)
+    n_sect   = len(items)
+    col_w    = max(5, (w - 8) // max(n_sect, 1))
+    axis_col = 5       # y-axis at column 5
+    data_col = axis_col + 1
 
+    safe_addstr(win, 3, 2, "Current Sentiment  (◆ = sector score, ─── = neutral 50)",
+                curses.color_pair(C_DIM))
+
+    # Y-axis ticks
+    for r in range(plot_h + 1):
+        val  = 100 - int(r / plot_h * 100)
+        prow = 4 + r
+        if prow >= h - 1:
+            break
+        if val % 20 == 0:
+            safe_addstr(win, prow, 2,  f"{val:>3}", curses.color_pair(C_DIM))
+            safe_addstr(win, prow, axis_col, "┤", curses.color_pair(C_BORDER))
+        else:
+            safe_addstr(win, prow, axis_col, "│", curses.color_pair(C_BORDER))
+
+    # Neutral line at score = 50
+    neutral_row = 4 + int((100 - 50) / 100 * plot_h)
+    for nc in range(data_col, data_col + n_sect * col_w + 2):
+        safe_addstr(win, neutral_row, nc, "─", curses.color_pair(C_DIM))
+
+    # Plot each sector as ◆ with score label; draw connecting dashes between dots
+    prev_col = prev_dot_row = None
     for i, (sector, score) in enumerate(items):
-        col   = 2 + i * bar_unit
-        bar_h = int((score / 100) * chart_h)
-        scol  = score_color(score)
-        for r in range(chart_h):
-            row = 4 + chart_h - r
-            if row < h - 1:
-                ch   = "█" if r < bar_h else "░"
-                attr = scol if r < bar_h else curses.color_pair(C_BORDER)
-                for bc in range(min(bar_unit - 1, 7)):
-                    safe_addstr(win, row, col + bc, ch, attr)
-        label = sector[:bar_unit-1]
-        safe_addstr(win, 4 + chart_h + 1, col, label,       curses.color_pair(C_DIM))
-        safe_addstr(win, 4 + chart_h + 2, col, str(score),  score_color(score) | curses.A_BOLD)
+        col     = data_col + i * col_w + col_w // 2
+        dot_row = 4 + max(0, min(plot_h, int((100 - score) / 100 * plot_h)))
+        scol    = score_color(score)
+        if dot_row < h - 1:
+            safe_addstr(win, dot_row, col, "◆", scol | curses.A_BOLD)
+            safe_addstr(win, dot_row, col + 1, f"{score}", scol)
+            # Connect consecutive dots with dashes
+            if prev_col is not None and prev_dot_row is not None:
+                step_r = (dot_row - prev_dot_row)
+                step_c = col - prev_col
+                steps  = max(abs(step_r), abs(step_c), 1)
+                for s in range(1, steps):
+                    cr = prev_dot_row + int(step_r * s / steps)
+                    cc = prev_col     + int(step_c * s / steps)
+                    if 4 <= cr < h - 1 and cc > axis_col:
+                        safe_addstr(win, cr, cc, "·", curses.color_pair(C_DIM))
+            prev_col, prev_dot_row = col, dot_row
+        # Sector label at x-axis
+        lbl_row = 4 + plot_h + 1
+        if lbl_row < h - 1:
+            safe_addstr(win, lbl_row, data_col + i * col_w,
+                        sector[:col_w - 1], curses.color_pair(C_DIM))
 
-    # ── ETF horizontal bars ──
-    div_row = 4 + chart_h + 4
-    if div_row < h - 3:
-        win.hline(div_row, 0, curses.ACS_HLINE, w)
-        safe_addstr(win, div_row + 1, 2, "ETF conviction scores", curses.color_pair(C_DIM))
-        bar_max = w - 32
-        for j, r in enumerate(recs):
-            row = div_row + 2 + j
-            if row >= h - 1: break
-            bar_w = int((r["score"] / 5.0) * bar_max)
-            scol  = score_color(r["sentiment"])
-            safe_addstr(win, row, 2,  f"{r['ticker']:<6}", curses.color_pair(C_ACCENT) | curses.A_BOLD)
-            safe_addstr(win, row, 9,  "█" * bar_w,          scol)
-            safe_addstr(win, row, 9 + bar_w, f"░" * (bar_max - bar_w), curses.color_pair(C_BORDER))
-            safe_addstr(win, row, 10 + bar_max, f" {r['score']:.1f}", scol | curses.A_BOLD)
+    # X-axis
+    ax_row = 4 + plot_h
+    if ax_row < h - 1:
+        safe_addstr(win, ax_row, axis_col,
+                    "┴" + "─" * (n_sect * col_w + 2), curses.color_pair(C_BORDER))
+
+    div1 = 4 + plot_h + 3
+
+    # ── [B] Sentiment history sparklines (dual-res: daily + recent hourly) ──
+    if div1 < h - 4:
+        win.hline(div1, 0, curses.ACS_HLINE, w)
+        timeline = combined_timeline(state)
+        pts      = len(timeline)
+        spark_w  = max(4, w - 20)
+        safe_addstr(win, div1 + 1, 2,
+                    f"History  ({pts}/3 snapshots · 30-min cadence · left=oldest right=now)",
+                    curses.color_pair(C_DIM))
+
+        if pts < 2:
+            safe_addstr(win, div1 + 2, 2,
+                        "Saving a snapshot every 30 min — come back in 30 min for trend.",
+                        curses.color_pair(C_DIM))
+        else:
+            step    = max(1, pts // spark_w)
+            sampled = timeline[::step][-spark_w:]
+            for si, sector in enumerate(sectors):
+                spark_row = div1 + 2 + si
+                if spark_row >= h - 3:
+                    break
+                vals = [s["scores"].get(sector, 50) for s in sampled]
+                bar  = "".join(_spark_char(v) for v in vals)
+                avg  = int(sum(vals) / len(vals)) if vals else 50
+                safe_addstr(win, spark_row, 2,  f"{sector:<13}", curses.color_pair(C_DIM))
+                safe_addstr(win, spark_row, 16, bar,              score_color(avg))
+                safe_addstr(win, spark_row, 16 + len(bar) + 1,
+                            f"{avg:>3}", score_color(avg) | curses.A_BOLD)
+
+    div2 = div1 + 2 + len(sectors) + 2
+
+    # ── [C] Sector correlation matrix ──
+    timeline = combined_timeline(state)
+    corr     = compute_correlations(timeline, sectors)
+    if div2 < h - 3:
+        win.hline(div2, 0, curses.ACS_HLINE, w)
+        if corr is None:
+            safe_addstr(win, div2 + 1, 2,
+                        "Correlation: need ≥3 hourly snapshots — keep the app running.",
+                        curses.color_pair(C_DIM))
+        else:
+            safe_addstr(win, div2 + 1, 2,
+                        "Sector Correlation  (Pearson r, green≥0.5 / red≤-0.5)",
+                        curses.color_pair(C_DIM))
+            abbr = [s[:4] for s in sectors]
+            hdr_row = div2 + 2
+            if hdr_row < h - 1:
+                col = 16
+                for a in abbr:
+                    safe_addstr(win, hdr_row, col, f"{a:>5}",
+                                curses.color_pair(C_DIM) | curses.A_BOLD)
+                    col += 5
+            for ri, s1 in enumerate(sectors):
+                rrow = div2 + 3 + ri
+                if rrow >= h - 1:
+                    break
+                safe_addstr(win, rrow, 2, f"{s1:<13}", curses.color_pair(C_DIM))
+                col = 16
+                for s2 in sectors:
+                    r_val = corr.get((s1, s2), 0.0)
+                    r_str = f"{r_val:+.2f}"
+                    if s1 == s2:
+                        attr = curses.color_pair(C_DIM) | curses.A_BOLD
+                    elif r_val >= 0.5:
+                        attr = curses.color_pair(C_POS) | curses.A_BOLD
+                    elif r_val <= -0.5:
+                        attr = curses.color_pair(C_NEG) | curses.A_BOLD
+                    else:
+                        attr = curses.color_pair(C_NEU)
+                    safe_addstr(win, rrow, col, f"{r_str:>5}", attr)
+                    col += 5
 
 # ─── MAIN LOOP ────────────────────────────────────────────────────────────────
 
@@ -629,12 +1198,16 @@ def main(stdscr):
     curses.mousemask(curses.ALL_MOUSE_EVENTS | curses.REPORT_MOUSE_POSITION)
 
     state = AppState()
+    load_history(state)   # load stored sentiment snapshots from disk
 
     def bg_fetch():
         fetch_all_news(state)
+        save_snapshot(state)
 
     t = threading.Thread(target=bg_fetch, daemon=True)
     t.start()
+    # Fetch Polymarket on startup (background, non-blocking)
+    threading.Thread(target=fetch_polymarket, args=(state,), daemon=True).start()
 
     last_refresh = time.time()
 
@@ -644,7 +1217,7 @@ def main(stdscr):
 
         with state.lock:
             draw_topbar(stdscr, state)
-            if state.loading:
+            if state.loading and state.tab != 2:
                 msg = "⠿ Fetching news feeds in parallel… please wait"
                 safe_addstr(stdscr, h//2,
                     max(0, (w - len(msg)) // 2), msg,
@@ -652,8 +1225,9 @@ def main(stdscr):
             else:
                 if   state.tab == 0: draw_news(stdscr, state)
                 elif state.tab == 1: draw_sectors(stdscr, state)
-                elif state.tab == 2: draw_watchlist(stdscr, state)
-                elif state.tab == 3: draw_chart(stdscr, state)
+                elif state.tab == 2: draw_mkt(stdscr, state)
+                elif state.tab == 3: draw_watchlist(stdscr, state)
+                elif state.tab == 4: draw_chart(stdscr, state)
             draw_statusbar(stdscr, state)
 
         stdscr.refresh()
@@ -663,8 +1237,13 @@ def main(stdscr):
             break
         elif key == ord('1'): state.tab = 0
         elif key == ord('2'): state.tab = 1
-        elif key == ord('3'): state.tab = 2
+        elif key == ord('3'):
+            state.tab = 2
+            # Lazy-load market data on first visit
+            if not state.mkt_data and not state.mkt_loading:
+                threading.Thread(target=fetch_mkt_data, args=(state,), daemon=True).start()
         elif key == ord('4'): state.tab = 3
+        elif key == ord('5'): state.tab = 4
 
         elif key == curses.KEY_MOUSE:
             try:
@@ -672,9 +1251,12 @@ def main(stdscr):
                 if bstate & curses.BUTTON1_CLICKED or bstate & curses.BUTTON1_PRESSED:
                     # ── Top bar tab clicks ──
                     if my == 0:
-                        tabs_start = [13, 21, 31, 43]  # approx col positions
+                        # " [1]News "[9] " [2]Sectors "[12] " [3]Mkt "[9] " [4]Watchlist "[14] " [5]Chart "[11]
+                        tabs_start = [13, 22, 34, 43, 57]
                         for i, col in enumerate(tabs_start):
-                            if mx >= col and (i == len(tabs_start)-1 or mx < tabs_start[i+1]+2):
+                            if mx >= col and (i == len(tabs_start)-1 or mx < tabs_start[i+1]):
+                                if i == 2 and not state.mkt_data and not state.mkt_loading:
+                                    threading.Thread(target=fetch_mkt_data, args=(state,), daemon=True).start()
                                 state.tab = i
                                 break
 
@@ -707,7 +1289,7 @@ def main(stdscr):
                 state.sel = max(0, state.sel - 1)
                 if state.sel < state.scroll:
                     state.scroll = state.sel
-            elif state.tab == 2:
+            elif state.tab == 3:   # Watchlist
                 state.etf_scroll = max(0, state.etf_scroll - 1)
 
         elif key == curses.KEY_DOWN:
@@ -715,11 +1297,15 @@ def main(stdscr):
                 state.sel = min(max(0, len(state.news)-1), state.sel + 1)
                 if state.sel >= state.scroll + (h - 5):
                     state.scroll = state.sel - (h - 6)
-            elif state.tab == 2:
+            elif state.tab == 3:   # Watchlist
                 state.etf_scroll += 1
 
         elif key in (ord('r'), ord('R')):
-            if not state.loading:
+            if state.tab == 2:
+                if not state.mkt_loading:
+                    threading.Thread(target=fetch_mkt_data, args=(state,), daemon=True).start()
+                threading.Thread(target=fetch_polymarket, args=(state,), daemon=True).start()
+            elif not state.loading:
                 state.loading = True
                 state.news    = []
                 threading.Thread(target=bg_fetch, daemon=True).start()
@@ -729,6 +1315,9 @@ def main(stdscr):
             last_refresh = time.time()
             state.loading = True
             threading.Thread(target=bg_fetch, daemon=True).start()
+            if not state.mkt_loading:
+                threading.Thread(target=fetch_mkt_data, args=(state,), daemon=True).start()
+            threading.Thread(target=fetch_polymarket, args=(state,), daemon=True).start()
 
 if __name__ == "__main__":
     try:
