@@ -537,20 +537,22 @@ def fetch_polymarket(state):
 
 # ─── HISTORY (sentiment snapshots for sparklines / correlation) ───────────────
 
+_MAX_SNAPS = 30 * 48   # 30 days × 48 half-hour slots = 1 440 entries max
+
 def load_history(state):
-    """Load last 3 snapshots; handles both old dict and new list format."""
+    """Load snapshots from disk; handles old dict and new list format."""
     try:
         if os.path.exists(HIST_FILE):
             with open(HIST_FILE) as f:
                 raw = json.load(f)
             if isinstance(raw, dict):
                 raw = raw.get("hourly", [])   # migrate old dual-res format
-            state.history = raw[-3:]
+            state.history = raw
     except Exception:
         state.history = []
 
 def save_snapshot(state):
-    """Save a snapshot every 30 min; keep only the last 3."""
+    """Save one snapshot every 30 min; keep up to 30 days of intraday data."""
     scores = compute_sector_scores(state.news)
     if not scores:
         return
@@ -558,12 +560,12 @@ def save_snapshot(state):
     if state.history:
         try:
             last_dt = datetime.fromisoformat(state.history[-1]["ts"])
-            if (now - last_dt).total_seconds() < 1800:   # 30 min throttle
+            if (now - last_dt).total_seconds() < 1800:   # 30-min throttle
                 return
         except Exception:
             pass
     state.history.append({"ts": now.isoformat(), "scores": scores})
-    state.history = state.history[-3:]   # rolling window of 3
+    state.history = state.history[-_MAX_SNAPS:]
     try:
         with open(HIST_FILE, "w") as f:
             json.dump(state.history, f)
@@ -571,7 +573,18 @@ def save_snapshot(state):
         pass
 
 def combined_timeline(state):
-    return state.history   # simple list now
+    return state.history
+
+def compute_daily_averages(history):
+    """Group all snapshots by date; return {date_str: {sector: avg_score}}.
+    Dates are sorted chronologically; today's entry is updated live."""
+    buckets = defaultdict(lambda: defaultdict(list))
+    for snap in history:
+        date = snap["ts"][:10]
+        for sector, score in snap["scores"].items():
+            buckets[date][sector].append(score)
+    return {d: {s: int(sum(v) / len(v)) for s, v in sectors.items()}
+            for d, sectors in sorted(buckets.items())}
 
 def compute_correlations(timeline, sectors):
     """Pearson correlation matrix over a flat list of {ts, scores} snapshots."""
@@ -1047,7 +1060,8 @@ def draw_chart(win, state):
     sectors = list(SECTOR_KEYWORDS.keys())
 
     n_snaps   = len(state.history)
-    snap_info = f"{n_snaps}/3 snapshots · every 30 min"
+    n_days    = len(set(s["ts"][:10] for s in state.history)) if state.history else 0
+    snap_info = f"{n_snaps} snapshots · {n_days}d · 30-min cadence"
     safe_addstr(win, 1, 2, "SECTOR CHART", curses.color_pair(C_HEADER) | curses.A_BOLD)
     safe_addstr(win, 1, 16, f"  ({snap_info})", curses.color_pair(C_DIM))
     win.hline(2, 0, curses.ACS_HLINE, w)
@@ -1113,51 +1127,107 @@ def draw_chart(win, state):
 
     div1 = 4 + plot_h + 3
 
-    # ── [B] Sentiment history sparklines (dual-res: daily + recent hourly) ──
+    # ── [B] Sector daily average grid ──
+    daily_avgs  = compute_daily_averages(state.history)
+    today_iso   = datetime.now().date().isoformat()
+    all_dates   = sorted(daily_avgs.keys())
+    label_w     = 13
+    col_w       = 5                              # " nn  " per day
+    cols_fit    = max(1, (w - label_w - 4) // col_w)
+    dates_shown = all_dates[-cols_fit:]
+
     if div1 < h - 4:
         win.hline(div1, 0, curses.ACS_HLINE, w)
-        timeline = combined_timeline(state)
-        pts      = len(timeline)
-        spark_w  = max(4, w - 20)
+        n_days_str = f"{len(all_dates)}d · {n_snaps} snapshots"
         safe_addstr(win, div1 + 1, 2,
-                    f"History  ({pts}/3 snapshots · 30-min cadence · left=oldest right=now)",
-                    curses.color_pair(C_DIM))
+                    f"Daily Avg Sentiment  ({n_days_str})",
+                    curses.color_pair(C_DIM) | curses.A_BOLD)
 
-        if pts < 2:
+        if not daily_avgs:
             safe_addstr(win, div1 + 2, 2,
-                        "Saving a snapshot every 30 min — come back in 30 min for trend.",
+                        "First snapshot in ~30 min after startup.",
                         curses.color_pair(C_DIM))
         else:
-            step    = max(1, pts // spark_w)
-            sampled = timeline[::step][-spark_w:]
-            for si, sector in enumerate(sectors):
-                spark_row = div1 + 2 + si
-                if spark_row >= h - 3:
+            # Date header
+            hrow = div1 + 2
+            if hrow < h - 1:
+                col = label_w + 4
+                for d in dates_shown:
+                    lbl = "Today" if d == today_iso else d[5:]  # "MM-DD"
+                    safe_addstr(win, hrow, col, f"{lbl:>{col_w}}",
+                                curses.color_pair(C_DIM) | curses.A_BOLD)
+                    col += col_w
+            # Sector rows
+            for ri, sector in enumerate(sectors):
+                rrow = div1 + 3 + ri
+                if rrow >= h - 2:
                     break
-                vals = [s["scores"].get(sector, 50) for s in sampled]
-                bar  = "".join(_spark_char(v) for v in vals)
-                avg  = int(sum(vals) / len(vals)) if vals else 50
-                safe_addstr(win, spark_row, 2,  f"{sector:<13}", curses.color_pair(C_DIM))
-                safe_addstr(win, spark_row, 16, bar,              score_color(avg))
-                safe_addstr(win, spark_row, 16 + len(bar) + 1,
-                            f"{avg:>3}", score_color(avg) | curses.A_BOLD)
+                safe_addstr(win, rrow, 2, f"{sector:<{label_w}}", curses.color_pair(C_DIM))
+                col = label_w + 4
+                for d in dates_shown:
+                    sc = daily_avgs.get(d, {}).get(sector)
+                    if sc is not None:
+                        safe_addstr(win, rrow, col, f"{sc:>{col_w}}",
+                                    score_color(sc) | curses.A_BOLD)
+                    else:
+                        safe_addstr(win, rrow, col, f"{'—':>{col_w}}",
+                                    curses.color_pair(C_BORDER))
+                    col += col_w
 
-    div2 = div1 + 2 + len(sectors) + 2
+    div2 = div1 + 3 + len(sectors) + 2
 
-    # ── [C] Sector correlation matrix ──
+    # ── [C] ETF daily conviction grid ──
+    if div2 < h - 4 and daily_avgs:
+        win.hline(div2, 0, curses.ACS_HLINE, w)
+        safe_addstr(win, div2 + 1, 2,
+                    "Daily Avg ETF Conviction  (top ETF per sector, score 0-5★)",
+                    curses.color_pair(C_DIM) | curses.A_BOLD)
+        # Date header
+        hrow = div2 + 2
+        if hrow < h - 1:
+            col = label_w + 4
+            for d in dates_shown:
+                lbl = "Today" if d == today_iso else d[5:]
+                safe_addstr(win, hrow, col, f"{lbl:>{col_w}}",
+                            curses.color_pair(C_DIM) | curses.A_BOLD)
+                col += col_w
+        # One row per sector: ticker (top ETF) + daily conviction
+        for ri, sector in enumerate(sectors):
+            rrow = div2 + 3 + ri
+            if rrow >= h - 2:
+                break
+            etf_ticker = SECTOR_ETFS.get(sector, [("---","")])[0][0]
+            label = f"{etf_ticker:<6}{sector[:6]}"
+            safe_addstr(win, rrow, 2, f"{label:<{label_w}}", curses.color_pair(C_ACCENT))
+            col = label_w + 4
+            for d in dates_shown:
+                sc   = daily_avgs.get(d, {}).get(sector)
+                conv = round((sc / 100) * 5, 1) if sc is not None else None
+                if conv is not None:
+                    safe_addstr(win, rrow, col, f"{conv:>{col_w}.1f}",
+                                score_color(sc) | curses.A_BOLD)
+                else:
+                    safe_addstr(win, rrow, col, f"{'—':>{col_w}}",
+                                curses.color_pair(C_BORDER))
+                col += col_w
+
+    div3 = div2 + 3 + len(sectors) + 2
+
+    # ── [D] Sector correlation matrix ──
     timeline = combined_timeline(state)
     corr     = compute_correlations(timeline, sectors)
-    if div2 < h - 3:
-        win.hline(div2, 0, curses.ACS_HLINE, w)
+    if div3 < h - 3:
+        win.hline(div3, 0, curses.ACS_HLINE, w)
+        div2 = div3   # reuse variable for the block below
         if corr is None:
             safe_addstr(win, div2 + 1, 2,
-                        "Correlation: need ≥3 hourly snapshots — keep the app running.",
+                        "Correlation: need ≥3 snapshots — builds after ~1 h.",
                         curses.color_pair(C_DIM))
         else:
             safe_addstr(win, div2 + 1, 2,
-                        "Sector Correlation  (Pearson r, green≥0.5 / red≤-0.5)",
-                        curses.color_pair(C_DIM))
-            abbr = [s[:4] for s in sectors]
+                        "Sector Correlation  (Pearson r · green≥+0.5 · red≤-0.5)",
+                        curses.color_pair(C_DIM) | curses.A_BOLD)
+            abbr    = [s[:4] for s in sectors]
             hdr_row = div2 + 2
             if hdr_row < h - 1:
                 col = 16
