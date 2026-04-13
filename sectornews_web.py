@@ -427,18 +427,16 @@ body {
   #news-list-col { order: 1; }
   #news-detail {
     order: 2; margin-top: 10px; position: static;
-    min-width: 0; display: none; /* shown via JS when row tapped */
+    min-width: 0; display: block;
   }
-  #news-detail.visible { display: block; }
 
   /* Bigger tap rows */
   #news-table td { padding: 11px 6px; font-size: 13px; }
   #news-table th { padding: 6px 6px; }
 
-  /* Hide source, sector & theme columns — keep age + signal + headline */
+  /* Hide source & sector columns — keep age + signal + theme + headline */
   .col-src, th.col-src { display: none; }
   .col-sect, th.col-sect { display: none; }
-  .col-theme, th.col-theme { display: none; }
 
   /* Sectors: un-indent headlines */
   .sector-headlines { margin-left: 0; margin-top: 6px; }
@@ -572,10 +570,6 @@ function switchTab(name) {
   });
   document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
   document.getElementById('panel-' + name).classList.add('active');
-  // Hide detail pane when switching away from news on mobile
-  if (name !== 'news') {
-    document.getElementById('news-detail').classList.remove('visible');
-  }
 }
 
 /* ── Helpers ── */
@@ -607,10 +601,8 @@ function renderNews(news) {
       document.querySelectorAll('#news-table tr').forEach((r,ri) =>
         r.classList.toggle('selected', ri === i + 1));
       renderDetail(a);
-      // On mobile, show the detail panel and scroll to it
-      const det = document.getElementById('news-detail');
-      det.classList.add('visible');
-      setTimeout(() => det.scrollIntoView({behavior:'smooth', block:'nearest'}), 50);
+      // Scroll to detail panel on mobile
+      setTimeout(() => document.getElementById('news-detail').scrollIntoView({behavior:'smooth', block:'nearest'}), 50);
     };
     tbody.appendChild(tr);
   });
