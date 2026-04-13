@@ -84,6 +84,16 @@ SECTOR_KEYWORDS = {
                     "interest rate","affordability","30-year"],
 }
 
+BULLISH_PHRASES = [
+    "rate cut","rate cuts","ceasefire","peace deal","earnings beat","dovish",
+    "quantitative easing","record high","better than expected","trade deal",
+    "rate reduction","debt ceiling resolved","stimulus","budget surplus",
+]
+BEARISH_PHRASES = [
+    "rate hike","hawkish","earnings miss","bank failure","recession fears",
+    "mass layoffs","war escalates","quantitative tightening","trade war",
+    "debt crisis","stagflation","credit crunch","defaults surge","bank run",
+]
 POSITIVE_WORDS = [
     "surge","soar","rise","gain","rally","jump","climb","boost","record","high",
     "growth","profit","beat","strong","bullish","upside","expand","recovery",
@@ -92,10 +102,35 @@ POSITIVE_WORDS = [
 ]
 NEGATIVE_WORDS = [
     "fall","drop","slump","crash","plunge","decline","loss","miss","weak",
-    "bearish","risk","warn","collapse","fail","cut","downgrade","uncertainty",
+    "bearish","risk","warn","collapse","fail","downgrade","uncertainty",
     "concern","threat","tension","conflict","tariff","sanction","ban","restrict",
     "recession","contraction","default","debt","crisis","investigation","probe",
 ]
+
+THEME_KEYWORDS = {
+    "geopolitics": ["war","military","nato","sanction","ceasefire","treaty","missile",
+                    "troops","invasion","conflict","geopolit","diplomacy","iran","ukraine",
+                    "taiwan","china","russia","israel","pentagon","nuclear"],
+    "macro":       ["fed","federal reserve","rate cut","rate hike","inflation","gdp",
+                    "unemployment","jobs","payroll","cpi","pce","treasury","yield",
+                    "recession","central bank","monetary","fiscal","deficit","debt ceiling",
+                    "boe","ecb","imf","world bank","fomc","interest rate"],
+    "crypto":      ["bitcoin","btc","ethereum","eth","crypto","blockchain","defi","nft",
+                    "stablecoin","coinbase","binance","solana","web3","altcoin","token",
+                    "mining","crypto exchange","digital asset"],
+    "markets":     ["stock","equity","s&p","nasdaq","ipo","merger","earnings","acquisition",
+                    "dividend","buyback","sp500","dow jones","russell","hedge fund",
+                    "options","futures","etf","portfolio","rally","selloff"],
+}
+
+def classify_theme(text):
+    t = text.lower()
+    best, best_n = "markets", 0
+    for theme, kws in THEME_KEYWORDS.items():
+        n = sum(1 for kw in kws if kw in t)
+        if n > best_n:
+            best, best_n = theme, n
+    return best
 
 SECTOR_ETFS = {
     "Energy":      [("XLE","Energy Select Sector SPDR"),("VDE","Vanguard Energy ETF"),
@@ -149,12 +184,14 @@ def fetch_feed(source, url, timeout=10):
 
 def score_sentiment(text):
     t = text.lower()
-    pos = sum(1 for w in POSITIVE_WORDS if w in t)
-    neg = sum(1 for w in NEGATIVE_WORDS if w in t)
+    pos = sum(2 for ph in BULLISH_PHRASES if ph in t)
+    neg = sum(2 for ph in BEARISH_PHRASES if ph in t)
+    pos += sum(1 for w in POSITIVE_WORDS if w in t)
+    neg += sum(1 for w in NEGATIVE_WORDS if w in t)
     total = pos + neg
     if total == 0:
         return 50
-    return int((pos / total) * 100)
+    return max(0, min(100, int((pos / total) * 100)))
 
 def classify_sector(text):
     t = text.lower()
@@ -183,24 +220,43 @@ def format_age(pub_str):
             pass
     return "?"
 
+def _age_secs(age_str):
+    try:
+        if age_str.endswith('s'): return int(age_str[:-1])
+        if age_str.endswith('m'): return int(age_str[:-1]) * 60
+        if age_str.endswith('h'): return int(age_str[:-1]) * 3600
+        if age_str.endswith('d'): return int(age_str[:-1]) * 86400
+    except: pass
+    return 86400
+
 def enrich(article):
     text = article["title"]
     article["sentiment"] = score_sentiment(text)
     article["sector"]    = classify_sector(text)
+    article["theme"]     = classify_theme(text)
     article["age"]       = format_age(article.get("pub",""))
     article["signal"]    = ("bullish" if article["sentiment"] >= 60
                             else "bearish" if article["sentiment"] <= 40
                             else "neutral")
+    article["is_trump"]  = "trump" in text.lower()
     return article
 
 def compute_sector_scores(news):
     sector_data = defaultdict(list)
     for a in news:
-        sector_data[a["sector"]].append(a["sentiment"])
+        secs = _age_secs(a.get("age", "1d"))
+        w = 3 if secs <= 7200 else (2 if secs <= 43200 else 1)
+        sector_data[a["sector"]].append((a["sentiment"], w))
     scores = {}
     for sector in SECTOR_KEYWORDS:
-        vals = sector_data.get(sector, [])
-        scores[sector] = int(sum(vals) / len(vals)) if vals else 50
+        items = sector_data.get(sector, [])
+        if not items:
+            scores[sector] = 50
+        elif len(items) == 1:
+            scores[sector] = items[0][0]
+        else:
+            total_w = sum(w for _, w in items)
+            scores[sector] = int(sum(s * w for s, w in items) / total_w)
     return dict(sorted(scores.items(), key=lambda x: -x[1]))
 
 def compute_etf_recommendations(sector_scores):
@@ -313,7 +369,8 @@ body {
 #news-table tr.selected td { background: #0a2730; }
 .col-age { color: #444; width: 42px; font-size: 11px; }
 .col-src { color: #00bcd4; width: 90px; }
-.col-sect { width: 100px; color: #888; font-size: 11px; }
+.col-sect { width: 95px; color: #888; font-size: 11px; }
+.col-theme { width: 90px; font-size: 11px; }
 
 /* ── Sectors tab ──────────────────────────────────────────────────────── */
 .sector-row { margin-bottom: 16px; }
@@ -378,9 +435,10 @@ body {
   #news-table td { padding: 11px 6px; font-size: 13px; }
   #news-table th { padding: 6px 6px; }
 
-  /* Hide source & sector columns — keep age + signal + headline */
+  /* Hide source, sector & theme columns — keep age + signal + headline */
   .col-src, th.col-src { display: none; }
   .col-sect, th.col-sect { display: none; }
+  .col-theme, th.col-theme { display: none; }
 
   /* Sectors: un-indent headlines */
   .sector-headlines { margin-left: 0; margin-top: 6px; }
@@ -444,10 +502,11 @@ body {
             <th class="col-src">Source</th>
             <th>Signal</th>
             <th class="col-sect">Sector</th>
+            <th class="col-theme">Theme</th>
             <th>Headline</th>
           </tr></thead>
           <tbody id="news-body">
-            <tr><td colspan="5" class="loading-msg">Fetching news feeds…</td></tr>
+            <tr><td colspan="6" class="loading-msg">Fetching news feeds…</td></tr>
           </tbody>
         </table>
       </div>
@@ -534,12 +593,15 @@ function renderNews(news) {
   news.forEach((a, i) => {
     const tr = document.createElement('tr');
     if (i === selectedIdx) tr.classList.add('selected');
+    const themeColor = {geopolitics:'#e74c3c',macro:'#f1c40f',crypto:'#1abc9c',markets:'#ecf0f1'};
+    const trumpStyle = a.is_trump ? ' style="color:#c678dd;font-weight:bold"' : '';
     tr.innerHTML =
       '<td class="col-age">' + a.age + '</td>' +
       '<td class="col-src">' + esc(a.source) + '</td>' +
       '<td class="' + sigClass(a.signal) + '">' + a.signal + '</td>' +
       '<td class="col-sect">' + esc(a.sector) + '</td>' +
-      '<td>' + esc(a.title) + '</td>';
+      '<td class="col-theme" style="color:' + (themeColor[a.theme]||'#ecf0f1') + ';font-weight:bold">' + esc(a.theme||'markets') + '</td>' +
+      '<td' + trumpStyle + '>' + esc(a.title) + '</td>';
     tr.onclick = () => {
       selectedIdx = i;
       document.querySelectorAll('#news-table tr').forEach((r,ri) =>
