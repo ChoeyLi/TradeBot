@@ -240,103 +240,201 @@ HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>sectornews</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>TradeBot</title>
 <style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { background: #0d0d0d; color: #c8c8c8; font-family: 'Menlo','Monaco','Consolas',monospace; font-size: 13px; }
-  #topbar { background: #111; border-bottom: 1px solid #222; display: flex; align-items: center; padding: 6px 12px; gap: 0; position: sticky; top: 0; z-index: 10; }
-  #topbar .brand { color: #00bcd4; font-weight: bold; margin-right: 16px; }
-  .tab { padding: 4px 12px; cursor: pointer; color: #555; border-radius: 3px; }
-  .tab.active { background: #00bcd4; color: #000; font-weight: bold; }
-  .tab:hover:not(.active) { color: #aaa; }
-  #status { margin-left: auto; color: #444; font-size: 11px; }
-  #main { padding: 12px; }
-  .panel { display: none; }
-  .panel.active { display: block; }
+/* ── Reset & base ─────────────────────────────────────────────────────── */
+* { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+html, body { height: 100%; }
+body {
+  background: #0d0d0d; color: #c8c8c8;
+  font-family: 'Menlo','Monaco','Consolas',monospace;
+  font-size: 13px; line-height: 1.4;
+  /* room for fixed bottom nav on mobile */
+  padding-bottom: env(safe-area-inset-bottom);
+}
 
-  /* News tab */
-  #news-table { width: 100%; border-collapse: collapse; }
-  #news-table th { color: #555; text-align: left; padding: 4px 8px; border-bottom: 1px solid #222; font-weight: normal; }
-  #news-table td { padding: 5px 8px; border-bottom: 1px solid #181818; vertical-align: top; cursor: pointer; }
-  #news-table tr:hover td { background: #161f22; }
-  #news-table tr.selected td { background: #0a2a2f; }
-  .sig-bullish { color: #4caf50; font-weight: bold; }
-  .sig-bearish { color: #f44336; font-weight: bold; }
-  .sig-neutral { color: #ffb300; font-weight: bold; }
-  .col-age { color: #444; width: 50px; }
-  .col-src { color: #00bcd4; width: 100px; }
-  .col-sect { width: 110px; }
-  .col-head { max-width: 500px; }
-  #news-wrap { display: flex; gap: 12px; }
-  #news-list-col { flex: 2; }
-  #news-detail { flex: 1; background: #111; border: 1px solid #222; border-radius: 4px; padding: 12px; min-height: 300px; }
-  #news-detail h3 { color: #e0e0e0; margin-bottom: 12px; font-size: 13px; line-height: 1.5; font-weight: normal; }
-  .detail-row { display: flex; margin-bottom: 6px; }
-  .detail-label { color: #555; width: 80px; flex-shrink: 0; }
-  .detail-val { color: #c8c8c8; }
-  .sent-bar-wrap { margin: 10px 0 4px; }
-  .sent-bar-bg { background: #222; border-radius: 3px; height: 10px; width: 180px; }
-  .sent-bar-fill { height: 10px; border-radius: 3px; }
-  .etf-list { margin-top: 10px; }
-  .etf-list h4 { color: #555; margin-bottom: 6px; font-weight: normal; font-size: 11px; }
-  .etf-row { display: flex; gap: 8px; margin-bottom: 4px; }
-  .etf-ticker { color: #4caf50; font-weight: bold; width: 50px; }
-  .etf-name { color: #555; }
+/* ── Top bar (desktop) ────────────────────────────────────────────────── */
+#topbar {
+  background: #111; border-bottom: 1px solid #222;
+  display: flex; align-items: center; flex-wrap: nowrap;
+  padding: 6px 12px; gap: 2px;
+  position: sticky; top: 0; z-index: 100;
+}
+#topbar .brand { color: #00bcd4; font-weight: bold; margin-right: 12px; white-space: nowrap; }
+.dtab { padding: 5px 10px; cursor: pointer; color: #555; border-radius: 3px; white-space: nowrap; font-size: 12px; }
+.dtab.active { background: #00bcd4; color: #000; font-weight: bold; }
+.dtab:hover:not(.active) { color: #aaa; }
+#status { margin-left: auto; color: #444; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 340px; }
 
-  /* Sectors tab */
-  .sector-row { margin-bottom: 14px; }
-  .sector-header { display: flex; align-items: center; gap: 12px; margin-bottom: 4px; }
-  .sector-name { width: 110px; color: #e0e0e0; font-weight: bold; }
-  .sector-score { width: 60px; font-weight: bold; }
-  .bar-wrap { flex: 1; background: #1a1a1a; border-radius: 3px; height: 14px; max-width: 500px; }
-  .bar-fill { height: 14px; border-radius: 3px; transition: width 0.4s; }
-  .sector-headlines { margin-left: 122px; }
-  .sector-hl { color: #444; font-size: 12px; margin-bottom: 2px; }
-  .sector-hl .sig-sym { margin-right: 6px; }
+/* ── Main content area ────────────────────────────────────────────────── */
+#main { padding: 10px 12px; }
+.panel { display: none; }
+.panel.active { display: block; }
 
-  /* Watchlist tab */
-  #watch-table { width: 100%; border-collapse: collapse; }
-  #watch-table th { color: #555; text-align: left; padding: 4px 8px; border-bottom: 1px solid #222; font-weight: normal; }
-  #watch-table td { padding: 6px 8px; border-bottom: 1px solid #181818; }
-  .ticker-col { color: #00bcd4; font-weight: bold; width: 70px; }
-  .stars { letter-spacing: -1px; }
+/* ── Signal & score colors ────────────────────────────────────────────── */
+.sig-bullish { color: #4caf50; font-weight: bold; }
+.sig-bearish { color: #f44336; font-weight: bold; }
+.sig-neutral  { color: #ffb300; font-weight: bold; }
+.c-pos { color: #4caf50; }
+.c-neg { color: #f44336; }
+.c-neu { color: #ffb300; }
+.bg-pos { background: #4caf50; }
+.bg-neg { background: #f44336; }
+.bg-neu { background: #ffb300; }
+.loading-msg { color: #555; padding: 40px; text-align: center; }
 
-  /* Chart tab */
-  #chart-wrap { display: flex; flex-direction: column; gap: 24px; }
-  .chart-section h3 { color: #555; font-size: 11px; margin-bottom: 10px; font-weight: normal; }
-  .bar-chart { display: flex; align-items: flex-end; gap: 6px; height: 140px; }
-  .bar-col { display: flex; flex-direction: column; align-items: center; gap: 4px; }
-  .bar-rect { width: 44px; border-radius: 3px 3px 0 0; transition: height 0.4s; }
-  .bar-label { color: #444; font-size: 10px; text-align: center; }
-  .bar-score { font-size: 11px; font-weight: bold; }
-  .horiz-bar-row { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; }
-  .horiz-bar-label { width: 50px; color: #00bcd4; font-weight: bold; font-size: 12px; }
-  .horiz-bar-bg { flex: 1; background: #1a1a1a; border-radius: 3px; height: 12px; max-width: 400px; }
-  .horiz-bar-fill { height: 12px; border-radius: 3px; }
-  .horiz-bar-score { width: 30px; font-size: 11px; font-weight: bold; }
+/* ── News tab ─────────────────────────────────────────────────────────── */
+#news-wrap { display: flex; gap: 12px; align-items: flex-start; }
+#news-list-col { flex: 2; min-width: 0; }
+#news-detail {
+  flex: 1; min-width: 240px; background: #111;
+  border: 1px solid #222; border-radius: 6px;
+  padding: 14px; position: sticky; top: 48px;
+}
+#news-detail h3 { color: #e0e0e0; margin-bottom: 12px; font-size: 13px; line-height: 1.6; font-weight: normal; }
+.detail-row { display: flex; margin-bottom: 7px; gap: 8px; }
+.detail-label { color: #555; min-width: 72px; flex-shrink: 0; font-size: 11px; }
+.detail-val { color: #c8c8c8; }
+.sent-bar-bg { background: #222; border-radius: 3px; height: 8px; margin-top: 6px; }
+.sent-bar-fill { height: 8px; border-radius: 3px; transition: width 0.3s; }
+.etf-list { margin-top: 12px; border-top: 1px solid #1e1e1e; padding-top: 10px; }
+.etf-list h4 { color: #444; margin-bottom: 8px; font-weight: normal; font-size: 11px; letter-spacing: .04em; }
+.etf-row { display: flex; gap: 8px; margin-bottom: 5px; align-items: baseline; }
+.etf-ticker { color: #4caf50; font-weight: bold; min-width: 46px; }
+.etf-name { color: #555; font-size: 11px; }
 
-  /* colors */
-  .c-pos { color: #4caf50; }
-  .c-neg { color: #f44336; }
-  .c-neu { color: #ffb300; }
-  .bg-pos { background: #4caf50; }
-  .bg-neg { background: #f44336; }
-  .bg-neu { background: #ffb300; }
+#news-table { width: 100%; border-collapse: collapse; }
+#news-table th { color: #444; text-align: left; padding: 5px 8px; border-bottom: 1px solid #1e1e1e; font-weight: normal; font-size: 11px; }
+#news-table td { padding: 7px 8px; border-bottom: 1px solid #161616; vertical-align: top; cursor: pointer; }
+#news-table tr:hover td { background: #141f22; }
+#news-table tr.selected td { background: #0a2730; }
+.col-age { color: #444; width: 42px; font-size: 11px; }
+.col-src { color: #00bcd4; width: 90px; }
+.col-sect { width: 100px; color: #888; font-size: 11px; }
 
-  .loading-msg { color: #555; padding: 40px; text-align: center; }
+/* ── Sectors tab ──────────────────────────────────────────────────────── */
+.sector-row { margin-bottom: 16px; }
+.sector-header { display: flex; align-items: center; gap: 10px; margin-bottom: 5px; }
+.sector-name { width: 105px; color: #e0e0e0; font-weight: bold; flex-shrink: 0; }
+.sector-score { width: 55px; font-weight: bold; flex-shrink: 0; }
+.bar-wrap { flex: 1; background: #1a1a1a; border-radius: 3px; height: 12px; }
+.bar-fill { height: 12px; border-radius: 3px; transition: width 0.4s; }
+.sector-headlines { margin-left: 115px; margin-top: 2px; }
+.sector-hl { color: #444; font-size: 11px; margin-bottom: 3px; line-height: 1.4; }
+.sector-hl .sym { margin-right: 5px; }
+
+/* ── Watchlist tab ────────────────────────────────────────────────────── */
+#watch-table { width: 100%; border-collapse: collapse; }
+#watch-table th { color: #444; text-align: left; padding: 5px 8px; border-bottom: 1px solid #1e1e1e; font-weight: normal; font-size: 11px; }
+#watch-table td { padding: 7px 8px; border-bottom: 1px solid #161616; }
+.ticker-col { color: #00bcd4; font-weight: bold; width: 65px; }
+.stars { letter-spacing: -2px; }
+
+/* ── Chart tab ────────────────────────────────────────────────────────── */
+#chart-wrap { display: flex; flex-direction: column; gap: 28px; }
+.chart-section h3 { color: #444; font-size: 11px; margin-bottom: 12px; font-weight: normal; letter-spacing: .05em; text-transform: uppercase; }
+.bar-chart { display: flex; align-items: flex-end; gap: 6px; height: 140px; flex-wrap: wrap; }
+.bar-col { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+.bar-rect { width: 42px; border-radius: 3px 3px 0 0; transition: height 0.4s; min-height: 2px; }
+.bar-label { color: #444; font-size: 10px; text-align: center; }
+.bar-score { font-size: 11px; font-weight: bold; }
+.hbar-row { display: flex; align-items: center; gap: 8px; margin-bottom: 7px; }
+.hbar-label { width: 46px; color: #00bcd4; font-weight: bold; font-size: 12px; flex-shrink: 0; }
+.hbar-bg { flex: 1; background: #1a1a1a; border-radius: 3px; height: 11px; }
+.hbar-fill { height: 11px; border-radius: 3px; transition: width 0.4s; }
+.hbar-score { width: 28px; font-size: 11px; font-weight: bold; text-align: right; }
+
+/* ── Bottom nav (mobile only, hidden on desktop) ──────────────────────── */
+#bottom-nav { display: none; }
+
+/* ════════════════════════════════════════════════════════════════════════
+   MOBILE  (≤ 767 px)
+   ════════════════════════════════════════════════════════════════════════ */
+@media (max-width: 767px) {
+  body { font-size: 14px; padding-bottom: calc(56px + env(safe-area-inset-bottom)); }
+
+  /* Top bar: hide desktop tabs, shrink */
+  #topbar { padding: 8px 12px; }
+  .dtab { display: none; }
+  #topbar .brand { font-size: 15px; margin-right: 0; }
+  #status { font-size: 11px; max-width: 180px; }
+
+  /* Main padding */
+  #main { padding: 8px; }
+
+  /* ── News: stack list above detail ── */
+  #news-wrap { flex-direction: column; gap: 0; }
+  #news-list-col { order: 1; }
+  #news-detail {
+    order: 2; margin-top: 10px; position: static;
+    min-width: 0; display: none; /* shown via JS when row tapped */
+  }
+  #news-detail.visible { display: block; }
+
+  /* Bigger tap rows */
+  #news-table td { padding: 11px 6px; font-size: 13px; }
+  #news-table th { padding: 6px 6px; }
+
+  /* Hide source & sector columns — keep age + signal + headline */
+  .col-src, th.col-src { display: none; }
+  .col-sect, th.col-sect { display: none; }
+
+  /* Sectors: un-indent headlines */
+  .sector-headlines { margin-left: 0; margin-top: 6px; }
+  .sector-hl { font-size: 12px; }
+  .sector-name { width: 90px; font-size: 13px; }
+  .bar-wrap { height: 10px; }
+  .bar-fill { height: 10px; }
+
+  /* Watchlist: hide Name column, keep Ticker / Sector / Conv / Stars */
+  .watch-name, th.watch-name { display: none; }
+  #watch-table td, #watch-table th { padding: 10px 6px; font-size: 13px; }
+
+  /* Chart: smaller bars, scrollable */
+  .bar-chart { height: 110px; overflow-x: auto; flex-wrap: nowrap; padding-bottom: 4px; }
+  .bar-rect { width: 36px; }
+  .bar-label { font-size: 9px; }
+
+  /* Bottom nav */
+  #bottom-nav {
+    display: flex; position: fixed; bottom: 0; left: 0; right: 0;
+    height: calc(56px + env(safe-area-inset-bottom));
+    padding-bottom: env(safe-area-inset-bottom);
+    background: #111; border-top: 1px solid #222;
+    z-index: 200;
+  }
+  .bnav-btn {
+    flex: 1; display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 3px; cursor: pointer; color: #444;
+    font-size: 10px; padding: 6px 0;
+    border: none; background: transparent;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .bnav-btn.active { color: #00bcd4; }
+  .bnav-icon { font-size: 18px; line-height: 1; }
+}
 </style>
 </head>
 <body>
+
+<!-- ── Top bar (desktop tabs) ── -->
 <div id="topbar">
-  <span class="brand">sectornews</span>
-  <span class="tab active" data-tab="news" onclick="switchTab('news')">[1] News</span>
-  <span class="tab" data-tab="sectors" onclick="switchTab('sectors')">[2] Sectors</span>
-  <span class="tab" data-tab="watchlist" onclick="switchTab('watchlist')">[3] Watchlist</span>
-  <span class="tab" data-tab="chart" onclick="switchTab('chart')">[4] Chart</span>
-  <span id="status">loading...</span>
+  <span class="brand">TradeBot</span>
+  <span class="dtab active" data-tab="news"     onclick="switchTab('news')">[1] News</span>
+  <span class="dtab"        data-tab="sectors"  onclick="switchTab('sectors')">[2] Sectors</span>
+  <span class="dtab"        data-tab="watchlist" onclick="switchTab('watchlist')">[3] Watchlist</span>
+  <span class="dtab"        data-tab="chart"    onclick="switchTab('chart')">[4] Chart</span>
+  <span id="status">loading…</span>
 </div>
+
+<!-- ── Panels ── -->
 <div id="main">
+
+  <!-- News -->
   <div class="panel active" id="panel-news">
     <div id="news-wrap">
       <div id="news-list-col">
@@ -348,72 +446,110 @@ HTML = """<!DOCTYPE html>
             <th class="col-sect">Sector</th>
             <th>Headline</th>
           </tr></thead>
-          <tbody id="news-body"><tr><td colspan="5" class="loading-msg">Fetching news feeds...</td></tr></tbody>
+          <tbody id="news-body">
+            <tr><td colspan="5" class="loading-msg">Fetching news feeds…</td></tr>
+          </tbody>
         </table>
       </div>
       <div id="news-detail">
-        <div style="color:#444;padding:20px 0">Select a headline to preview</div>
+        <div style="color:#444;padding:16px 0">Tap a headline to preview</div>
       </div>
     </div>
   </div>
+
+  <!-- Sectors -->
   <div class="panel" id="panel-sectors">
-    <div id="sectors-body"><div class="loading-msg">Loading...</div></div>
+    <div id="sectors-body"><div class="loading-msg">Loading…</div></div>
   </div>
+
+  <!-- Watchlist -->
   <div class="panel" id="panel-watchlist">
     <table id="watch-table">
       <thead><tr>
         <th class="ticker-col">Ticker</th>
-        <th>Name</th>
+        <th class="watch-name">Name</th>
         <th>Sector</th>
         <th>Conv.</th>
         <th>Signal</th>
       </tr></thead>
-      <tbody id="watch-body"><tr><td colspan="5" class="loading-msg">Loading...</td></tr></tbody>
+      <tbody id="watch-body">
+        <tr><td colspan="5" class="loading-msg">Loading…</td></tr>
+      </tbody>
     </table>
   </div>
+
+  <!-- Chart -->
   <div class="panel" id="panel-chart">
-    <div id="chart-body"><div class="loading-msg">Loading...</div></div>
+    <div id="chart-body"><div class="loading-msg">Loading…</div></div>
   </div>
+
 </div>
 
+<!-- ── Bottom nav (mobile only) ── -->
+<nav id="bottom-nav">
+  <button class="bnav-btn active" data-tab="news"      onclick="switchTab('news')">
+    <span class="bnav-icon">📰</span>News
+  </button>
+  <button class="bnav-btn"       data-tab="sectors"   onclick="switchTab('sectors')">
+    <span class="bnav-icon">🗂️</span>Sectors
+  </button>
+  <button class="bnav-btn"       data-tab="watchlist" onclick="switchTab('watchlist')">
+    <span class="bnav-icon">👁️</span>Watch
+  </button>
+  <button class="bnav-btn"       data-tab="chart"     onclick="switchTab('chart')">
+    <span class="bnav-icon">📊</span>Chart
+  </button>
+</nav>
+
 <script>
+'use strict';
 let appData = null;
 let selectedIdx = 0;
 
+/* ── Tab switching (syncs desktop tabs + mobile bottom nav) ── */
 function switchTab(name) {
-  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-  document.querySelector(`[data-tab="${name}"]`).classList.add('active');
+  document.querySelectorAll('.dtab, .bnav-btn').forEach(el => {
+    el.classList.toggle('active', el.dataset.tab === name);
+  });
   document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
-  document.getElementById(`panel-${name}`).classList.add('active');
+  document.getElementById('panel-' + name).classList.add('active');
+  // Hide detail pane when switching away from news on mobile
+  if (name !== 'news') {
+    document.getElementById('news-detail').classList.remove('visible');
+  }
 }
 
-function scoreClass(score) {
-  if (score >= 60) return 'c-pos';
-  if (score <= 40) return 'c-neg';
-  return 'c-neu';
-}
-function scoreBg(score) {
-  if (score >= 60) return 'bg-pos';
-  if (score <= 40) return 'bg-neg';
-  return 'bg-neu';
-}
-function sigClass(sig) {
-  return `sig-${sig}`;
+/* ── Helpers ── */
+function scoreClass(s) { return s >= 60 ? 'c-pos' : s <= 40 ? 'c-neg' : 'c-neu'; }
+function scoreBg(s)    { return s >= 60 ? 'bg-pos' : s <= 40 ? 'bg-neg' : 'bg-neu'; }
+function sigClass(s)   { return 'sig-' + s; }
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
+/* ── News ── */
 function renderNews(news) {
   const tbody = document.getElementById('news-body');
   tbody.innerHTML = '';
   news.forEach((a, i) => {
     const tr = document.createElement('tr');
     if (i === selectedIdx) tr.classList.add('selected');
-    tr.innerHTML = `
-      <td class="col-age" style="color:#444">${a.age}</td>
-      <td class="col-src" style="color:#00bcd4">${a.source}</td>
-      <td class="${sigClass(a.signal)}">${a.signal}</td>
-      <td class="col-sect">${a.sector}</td>
-      <td class="col-head">${escHtml(a.title)}</td>`;
-    tr.onclick = () => { selectedIdx = i; renderNews(news); renderDetail(a); };
+    tr.innerHTML =
+      '<td class="col-age">' + a.age + '</td>' +
+      '<td class="col-src">' + esc(a.source) + '</td>' +
+      '<td class="' + sigClass(a.signal) + '">' + a.signal + '</td>' +
+      '<td class="col-sect">' + esc(a.sector) + '</td>' +
+      '<td>' + esc(a.title) + '</td>';
+    tr.onclick = () => {
+      selectedIdx = i;
+      document.querySelectorAll('#news-table tr').forEach((r,ri) =>
+        r.classList.toggle('selected', ri === i + 1));
+      renderDetail(a);
+      // On mobile, show the detail panel and scroll to it
+      const det = document.getElementById('news-detail');
+      det.classList.add('visible');
+      setTimeout(() => det.scrollIntoView({behavior:'smooth', block:'nearest'}), 50);
+    };
     tbody.appendChild(tr);
   });
   if (news.length > 0 && selectedIdx < news.length) {
@@ -422,136 +558,122 @@ function renderNews(news) {
 }
 
 function renderDetail(a) {
-  const etfs = appData.etfs_by_sector[a.sector] || [];
+  const etfs = (appData.etfs_by_sector[a.sector] || []).slice(0, 4);
   const barPct = a.sentiment + '%';
   const barCls = scoreBg(a.sentiment);
   const scoreC = scoreClass(a.sentiment);
-  let etfHtml = '';
-  if (etfs.length) {
-    etfHtml = `<div class="etf-list"><h4>Related ETFs</h4>` +
-      etfs.slice(0,4).map(([t,n]) =>
-        `<div class="etf-row"><span class="etf-ticker">${t}</span><span class="etf-name">${n}</span></div>`
-      ).join('') + '</div>';
-  }
-  document.getElementById('news-detail').innerHTML = `
-    <h3>${escHtml(a.title)}</h3>
-    <div class="detail-row"><span class="detail-label">Source</span><span class="detail-val">${a.source}</span></div>
-    <div class="detail-row"><span class="detail-label">Sector</span><span class="detail-val" style="color:#00bcd4">${a.sector}</span></div>
-    <div class="detail-row"><span class="detail-label">Signal</span><span class="detail-val ${sigClass(a.signal)}">${a.signal.toUpperCase()}</span></div>
-    <div class="detail-row"><span class="detail-label">Age</span><span class="detail-val">${a.age} ago</span></div>
-    <div class="sent-bar-wrap">
-      <div class="detail-row"><span class="detail-label">Sentiment</span><span class="detail-val ${scoreC}">${a.sentiment}/100</span></div>
-      <div class="sent-bar-bg"><div class="sent-bar-fill ${barCls}" style="width:${barPct}"></div></div>
-    </div>
-    ${etfHtml}`;
+  const etfHtml = etfs.length
+    ? '<div class="etf-list"><h4>Related ETFs</h4>' +
+      etfs.map(([t,n]) =>
+        '<div class="etf-row"><span class="etf-ticker">' + t +
+        '</span><span class="etf-name">' + esc(n) + '</span></div>'
+      ).join('') + '</div>'
+    : '';
+  document.getElementById('news-detail').innerHTML =
+    '<h3>' + esc(a.title) + '</h3>' +
+    '<div class="detail-row"><span class="detail-label">Source</span><span class="detail-val">' + esc(a.source) + '</span></div>' +
+    '<div class="detail-row"><span class="detail-label">Sector</span><span class="detail-val" style="color:#00bcd4">' + esc(a.sector) + '</span></div>' +
+    '<div class="detail-row"><span class="detail-label">Signal</span><span class="detail-val ' + sigClass(a.signal) + '">' + a.signal.toUpperCase() + '</span></div>' +
+    '<div class="detail-row"><span class="detail-label">Age</span><span class="detail-val">' + a.age + ' ago</span></div>' +
+    '<div class="detail-row"><span class="detail-label">Sentiment</span><span class="detail-val ' + scoreC + '">' + a.sentiment + '/100</span></div>' +
+    '<div class="sent-bar-bg"><div class="sent-bar-fill ' + barCls + '" style="width:' + barPct + '"></div></div>' +
+    etfHtml;
 }
 
+/* ── Sectors ── */
 function renderSectors(sector_scores, news) {
-  const div = document.getElementById('sectors-body');
   let html = '';
   for (const [sector, score] of Object.entries(sector_scores)) {
-    const cls = scoreClass(score);
-    const bgCls = scoreBg(score);
-    const pct = score + '%';
-    const headlines = news.filter(a => a.sector === sector).slice(0,2);
-    const hlHtml = headlines.map(a => {
-      const sym = a.signal==='bullish' ? '+' : a.signal==='bearish' ? '-' : '~';
-      const symCls = sigClass(a.signal);
-      return `<div class="sector-hl"><span class="sig-sym ${symCls}">${sym}</span>${escHtml(a.title)}</div>`;
+    const cls = scoreClass(score), bgCls = scoreBg(score);
+    const hls = news.filter(a => a.sector === sector).slice(0, 2).map(a => {
+      const sym = a.signal==='bullish' ? '+' : a.signal==='bearish' ? '−' : '·';
+      return '<div class="sector-hl"><span class="sym ' + sigClass(a.signal) + '">' + sym +
+             '</span>' + esc(a.title) + '</div>';
     }).join('');
-    html += `<div class="sector-row">
-      <div class="sector-header">
-        <span class="sector-name">${sector}</span>
-        <span class="sector-score ${cls}">${score}/100</span>
-        <div class="bar-wrap"><div class="bar-fill ${bgCls}" style="width:${pct}"></div></div>
-      </div>
-      <div class="sector-headlines">${hlHtml}</div>
-    </div>`;
+    html +=
+      '<div class="sector-row">' +
+        '<div class="sector-header">' +
+          '<span class="sector-name">' + sector + '</span>' +
+          '<span class="sector-score ' + cls + '">' + score + '/100</span>' +
+          '<div class="bar-wrap"><div class="bar-fill ' + bgCls + '" style="width:' + score + '%"></div></div>' +
+        '</div>' +
+        '<div class="sector-headlines">' + hls + '</div>' +
+      '</div>';
   }
-  div.innerHTML = html || '<div class="loading-msg">No data</div>';
+  document.getElementById('sectors-body').innerHTML = html || '<div class="loading-msg">No data</div>';
 }
 
+/* ── Watchlist ── */
 function renderWatchlist(recs) {
-  const tbody = document.getElementById('watch-body');
-  tbody.innerHTML = recs.map(r => {
+  const rows = recs.map(r => {
     const cls = scoreClass(r.sentiment);
-    const stars = '★'.repeat(Math.round(r.score)) + '☆'.repeat(5 - Math.round(r.score));
-    return `<tr>
-      <td class="ticker-col">${r.ticker}</td>
-      <td>${r.name}</td>
-      <td style="color:#555">${r.sector}</td>
-      <td class="${cls}" style="font-weight:bold">${r.score.toFixed(1)}</td>
-      <td class="stars ${cls}">${stars}</td>
-    </tr>`;
-  }).join('') || '<tr><td colspan="5" class="loading-msg">No data</td></tr>';
+    const filled = Math.round(r.score);
+    const stars = '★'.repeat(filled) + '☆'.repeat(5 - filled);
+    return '<tr>' +
+      '<td class="ticker-col">' + r.ticker + '</td>' +
+      '<td class="watch-name">' + esc(r.name) + '</td>' +
+      '<td style="color:#666;font-size:12px">' + r.sector + '</td>' +
+      '<td class="' + cls + '" style="font-weight:bold">' + r.score.toFixed(1) + '</td>' +
+      '<td class="stars ' + cls + '">' + stars + '</td>' +
+    '</tr>';
+  }).join('');
+  document.getElementById('watch-body').innerHTML =
+    rows || '<tr><td colspan="5" class="loading-msg">No data</td></tr>';
 }
 
+/* ── Chart ── */
 function renderChart(sector_scores, recs) {
-  const div = document.getElementById('chart-body');
   const items = Object.entries(sector_scores);
   const maxH = 120;
+
   const barCols = items.map(([sector, score]) => {
     const h = Math.round((score / 100) * maxH);
-    const bgCls = scoreBg(score);
-    const cls = scoreClass(score);
-    const abbr = sector.length > 6 ? sector.slice(0,6) : sector;
-    return `<div class="bar-col">
-      <span class="bar-score ${cls}">${score}</span>
-      <div class="bar-rect ${bgCls}" style="height:${h}px"></div>
-      <span class="bar-label">${abbr}</span>
-    </div>`;
+    const bgCls = scoreBg(score), cls = scoreClass(score);
+    const abbr = sector.length > 7 ? sector.slice(0, 7) : sector;
+    return '<div class="bar-col">' +
+      '<span class="bar-score ' + cls + '">' + score + '</span>' +
+      '<div class="bar-rect ' + bgCls + '" style="height:' + h + 'px"></div>' +
+      '<span class="bar-label">' + abbr + '</span>' +
+    '</div>';
   }).join('');
 
-  const horizBars = recs.slice(0,8).map(r => {
+  const horizBars = recs.slice(0, 10).map(r => {
     const pct = (r.score / 5 * 100) + '%';
-    const bgCls = scoreBg(r.sentiment);
-    const cls = scoreClass(r.sentiment);
-    return `<div class="horiz-bar-row">
-      <span class="horiz-bar-label">${r.ticker}</span>
-      <div class="horiz-bar-bg"><div class="horiz-bar-fill ${bgCls}" style="width:${pct}"></div></div>
-      <span class="horiz-bar-score ${cls}">${r.score.toFixed(1)}</span>
-    </div>`;
+    const bgCls = scoreBg(r.sentiment), cls = scoreClass(r.sentiment);
+    return '<div class="hbar-row">' +
+      '<span class="hbar-label">' + r.ticker + '</span>' +
+      '<div class="hbar-bg"><div class="hbar-fill ' + bgCls + '" style="width:' + pct + '"></div></div>' +
+      '<span class="hbar-score ' + cls + '">' + r.score.toFixed(1) + '</span>' +
+    '</div>';
   }).join('');
 
-  div.innerHTML = `
-    <div id="chart-wrap">
-      <div class="chart-section">
-        <h3>Sentiment scores by sector</h3>
-        <div class="bar-chart">${barCols}</div>
-      </div>
-      <div class="chart-section">
-        <h3>ETF conviction scores</h3>
-        ${horizBars}
-      </div>
-    </div>`;
+  document.getElementById('chart-body').innerHTML =
+    '<div id="chart-wrap">' +
+      '<div class="chart-section"><h3>Sentiment by sector</h3>' +
+        '<div class="bar-chart">' + barCols + '</div></div>' +
+      '<div class="chart-section"><h3>ETF conviction</h3>' + horizBars + '</div>' +
+    '</div>';
 }
 
-function escHtml(s) {
-  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-}
-
+/* ── Data fetch & auto-refresh ── */
 async function loadData() {
   try {
-    const res = await fetch('/api/data');
-    const data = await res.json();
+    const data = await fetch('/api/data').then(r => r.json());
     appData = data;
-    const statusEl = document.getElementById('status');
-    if (data.loading) {
-      statusEl.textContent = 'Fetching feeds...';
-    } else {
-      statusEl.textContent = `Updated: ${data.last_update}  |  ${data.news.length} articles  |  Sources: Reuters·AP·MarketWatch·CNBC·FT`;
-    }
+    document.getElementById('status').textContent = data.loading
+      ? 'Fetching feeds…'
+      : 'Updated ' + data.last_update + '  ·  ' + data.news.length + ' articles';
     renderNews(data.news);
     renderSectors(data.sector_scores, data.news);
     renderWatchlist(data.etf_recs);
     renderChart(data.sector_scores, data.etf_recs);
   } catch(e) {
-    document.getElementById('status').textContent = 'Error fetching data';
+    document.getElementById('status').textContent = 'Network error';
   }
 }
 
 loadData();
-setInterval(loadData, 30000);  // refresh every 30s
+setInterval(loadData, 30000);
 </script>
 </body>
 </html>
