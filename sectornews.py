@@ -395,7 +395,7 @@ def fetch_all_news(state):
         t.join()
 
     all_articles = [a for batch in results for a in batch]
-    all_articles.sort(key=lambda x: x.get("pub",""), reverse=True)
+    all_articles.sort(key=lambda x: _age_secs(x.get("age", "?")))
     with state.lock:
         state.news        = all_articles[:60]
         state.loading     = False
@@ -407,77 +407,51 @@ def fetch_all_news(state):
 # Uses Yahoo Finance /v8/finance/chart per-symbol (more reliable than batch quote)
 
 import http.cookiejar as _cookiejar
+import subprocess
+import urllib.parse as _urlparse
 
-def _make_yf_opener():
-    """Build an opener that persists Yahoo session cookies."""
-    cj  = _cookiejar.CookieJar()
-    opener = urllib.request.build_opener(
-        urllib.request.HTTPSHandler(context=_SSL_CTX),
-        urllib.request.HTTPCookieProcessor(cj),
-    )
-    opener.addheaders = [
-        ("User-Agent",      _UA),
-        ("Accept",          "application/json, text/javascript, */*"),
-        ("Accept-Language", "en-US,en;q=0.9"),
-        ("Referer",         "https://finance.yahoo.com/"),
-    ]
-    return opener
-
-def _fetch_chart(opener, ticker, retries=2):
-    """Fetch 5-day daily OHLC from Yahoo chart endpoint (no auth needed)."""
-    sym_enc = urllib.request.quote(ticker)
-    url = (f"https://query1.finance.yahoo.com/v8/finance/chart/{sym_enc}"
-           "?interval=1d&range=5d")
+def _fetch_chart(ticker, retries=2):
+    """Fetch 5-day daily OHLC via curl — avoids Python urllib 429 fingerprinting."""
+    sym_enc = _urlparse.quote(ticker)
+    url = (f"https://query1.finance.yahoo.com/v7/finance/chart/{sym_enc}"
+           "?range=5d&interval=1d")
     for attempt in range(retries):
         try:
-            resp = opener.open(url, timeout=10)
-            d    = json.loads(resp.read())
-            res  = d["chart"]["result"][0]
-            meta = res["meta"]
+            r = subprocess.run(
+                ["curl", "-s", "-m", "10", "-A", "Mozilla/5.0", url],
+                capture_output=True, timeout=12,
+            )
+            d      = json.loads(r.stdout)
+            res    = d["chart"]["result"][0]
+            meta   = res["meta"]
             closes = [c for c in res["indicators"]["quote"][0].get("close", []) if c]
             price  = meta.get("regularMarketPrice")
             prev   = meta.get("chartPreviousClose") or (closes[-2] if len(closes) >= 2 else None)
-            chg    = ((price - prev) / prev * 100) if price and prev else None
+            chg    = round(((price - prev) / prev * 100), 2) if price and prev else None
+            price  = round(price, 2) if price else None
             return price, chg, closes
         except Exception:
             if attempt < retries - 1:
-                time.sleep(0.5)
+                time.sleep(1.0)
     return None, None, []
 
 def fetch_mkt_data(state):
-    """Fetch live quotes via Yahoo Finance chart endpoint (per-symbol, no API key)."""
+    """Fetch live quotes sequentially with gaps to stay under Yahoo rate limits."""
     with state.lock:
         state.mkt_loading = True
 
-    opener = _make_yf_opener()
-    rows   = [None] * len(MKT_SYMBOLS)
-
-    def _fetch_one(i, display, name, ticker, cat):
-        price, chg, closes = _fetch_chart(opener, ticker)
-        rows[i] = {
+    rows = []
+    for display, name, ticker, cat in MKT_SYMBOLS:
+        price, chg, closes = _fetch_chart(ticker)
+        rows.append({
             "symbol":   display, "name": name,
             "ticker":   ticker,  "category": cat,
             "price":    price,   "chg_pct": chg,
-            "closes":   closes,  # last 5 closes for sparkline
-        }
-
-    # Parallel fetch with small stagger to avoid hitting rate-limits
-    threads = []
-    for i, sym in enumerate(MKT_SYMBOLS):
-        t = threading.Thread(target=_fetch_one, args=(i, *sym), daemon=True)
-        threads.append(t)
-        t.start()
-        time.sleep(0.05)   # 50 ms stagger
-
-    for t in threads:
-        t.join(timeout=15)
+            "closes":   closes,
+        })
+        time.sleep(0.4)   # 400 ms gap to avoid 429
 
     # Fill any None slots (thread timeout)
-    for i, sym in enumerate(MKT_SYMBOLS):
-        if rows[i] is None:
-            rows[i] = {"symbol": sym[0], "name": sym[1], "ticker": sym[2],
-                       "category": sym[3], "price": None, "chg_pct": None, "closes": []}
-
     with state.lock:
         state.mkt_data        = rows
         state.mkt_loading     = False
