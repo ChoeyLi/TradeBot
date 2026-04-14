@@ -14,6 +14,8 @@ import re
 import os
 import sys
 import ssl
+import http.cookiejar as _cookiejar
+import math
 from datetime import datetime, timezone
 from collections import defaultdict
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -153,6 +155,37 @@ SECTOR_ETFS = {
                     ("XLRE","Real Estate Select SPDR"),("REM","iShares Mortgage Real Est.")],
 }
 
+# ─── MARKET DATA SYMBOLS ─────────────────────────────────────────────────────
+MKT_SYMBOLS = [
+    ("SPX",    "S&P 500",              "^GSPC",    "equity"),
+    ("NDX",    "Nasdaq 100",           "^NDX",     "equity"),
+    ("DJI",    "Dow Jones",            "^DJI",     "equity"),
+    ("RUT",    "Russell 2000",         "^RUT",     "equity"),
+    ("VIX",    "CBOE Volatility",      "^VIX",     "equity"),
+    ("Gold",   "Gold Futures",         "GC=F",     "commodity"),
+    ("Silver", "Silver Futures",       "SI=F",     "commodity"),
+    ("Oil",    "Crude Oil (WTI)",      "CL=F",     "commodity"),
+    ("NatGas", "Natural Gas",          "NG=F",     "commodity"),
+    ("BTC",    "Bitcoin",              "BTC-USD",  "crypto"),
+    ("ETH",    "Ethereum",             "ETH-USD",  "crypto"),
+    ("SOL",    "Solana",               "SOL-USD",  "crypto"),
+    ("DXY",    "Dollar Index",         "DX-Y.NYB", "forex"),
+    ("EUR",    "Euro / USD",           "EURUSD=X", "forex"),
+    ("GBP",    "Pound / USD",          "GBPUSD=X", "forex"),
+    ("JPY",    "USD / Yen",            "JPY=X",    "forex"),
+    ("10Y",    "10-Year Treasury",     "^TNX",     "fund"),
+    ("2Y",     "2-Year Treasury",      "^FVX",     "fund"),
+    ("HYG",    "High Yield Bond ETF",  "HYG",      "fund"),
+    ("LQD",    "Inv Grade Bond ETF",   "LQD",      "fund"),
+]
+
+_POLY_KWS = [
+    "fed","rate cut","rate hike","interest rate","recession","gdp","inflation","cpi",
+    "tariff","dollar","gold","oil","nasdaq","s&p","crypto","bitcoin","btc","eth",
+    "ethereum","economy","debt","treasury","iran","ukraine","war","ceasefire","trump",
+    "china","trade","powell","fiscal","deficit","opec","brent","wti",
+]
+
 # ─── DATA PIPELINE ───────────────────────────────────────────────────────────
 
 def fetch_feed(source, url, timeout=10):
@@ -289,6 +322,176 @@ def fetch_all_news(state):
         state["loading"]     = False
         state["last_update"] = datetime.now().strftime("%H:%M:%S")
         state["error"]       = None if all_articles else "No articles loaded (check internet)"
+    _save_snapshot_web(state)
+
+# ─── HISTORY / SNAPSHOT ───────────────────────────────────────────────────────
+
+HIST_FILE_WEB = os.path.expanduser("~/.sectornews_web_history.json")
+_MAX_SNAPS = 30 * 48  # 1440
+
+def _load_history_web():
+    try:
+        if os.path.exists(HIST_FILE_WEB):
+            with open(HIST_FILE_WEB) as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return []
+
+def _save_snapshot_web(state):
+    with state["lock"]:
+        news = list(state["news"])
+    scores = compute_sector_scores(news)
+    if not scores:
+        return
+    now = datetime.now()
+    with state["lock"]:
+        hist = state["history"]
+        if hist:
+            try:
+                last_dt = datetime.fromisoformat(hist[-1]["ts"])
+                if (now - last_dt).total_seconds() < 1800:
+                    return
+            except Exception:
+                pass
+        hist.append({"ts": now.isoformat(), "scores": scores})
+        state["history"] = hist[-_MAX_SNAPS:]
+        hist_to_save = list(state["history"])
+    try:
+        with open(HIST_FILE_WEB, "w") as f:
+            json.dump(hist_to_save, f)
+    except Exception:
+        pass
+
+# ─── YAHOO FINANCE MARKET DATA ────────────────────────────────────────────────
+
+def _make_yf_opener():
+    cj = _cookiejar.CookieJar()
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPSHandler(context=_SSL_CTX),
+        urllib.request.HTTPCookieProcessor(cj),
+    )
+    opener.addheaders = [
+        ("User-Agent", _UA),
+        ("Accept", "application/json"),
+        ("Accept-Language", "en-US,en;q=0.9"),
+        ("Referer", "https://finance.yahoo.com/"),
+    ]
+    return opener
+
+def _fetch_chart(opener, ticker, retries=2):
+    sym_enc = urllib.request.quote(ticker)
+    url = (f"https://query1.finance.yahoo.com/v8/finance/chart/{sym_enc}"
+           f"?interval=1d&range=5d")
+    for attempt in range(retries):
+        try:
+            resp = opener.open(url, timeout=10)
+            d = json.loads(resp.read())
+            res = d["chart"]["result"][0]
+            meta = res["meta"]
+            closes = [c for c in res["indicators"]["quote"][0].get("close", []) if c]
+            price = meta.get("regularMarketPrice")
+            prev  = meta.get("chartPreviousClose") or (closes[-2] if len(closes) >= 2 else None)
+            chg   = ((price - prev) / prev * 100) if price and prev else None
+            return price, chg, closes
+        except Exception:
+            if attempt < retries - 1:
+                time.sleep(0.5)
+    return None, None, []
+
+def fetch_mkt_data(state):
+    opener = _make_yf_opener()
+    rows = [None] * len(MKT_SYMBOLS)
+    def _fetch_one(i, display, name, ticker, cat):
+        price, chg, closes = _fetch_chart(opener, ticker)
+        rows[i] = {"symbol": display, "name": name, "ticker": ticker,
+                   "category": cat, "price": price, "chg_pct": chg, "closes": closes}
+    threads = []
+    for i, sym in enumerate(MKT_SYMBOLS):
+        t = threading.Thread(target=_fetch_one, args=(i, *sym), daemon=True)
+        threads.append(t)
+        t.start()
+        time.sleep(0.05)
+    for t in threads:
+        t.join(timeout=15)
+    for i, sym in enumerate(MKT_SYMBOLS):
+        if rows[i] is None:
+            rows[i] = {"symbol": sym[0], "name": sym[1], "ticker": sym[2],
+                       "category": sym[3], "price": None, "chg_pct": None, "closes": []}
+    with state["lock"]:
+        state["mkt_data"]    = rows
+        state["mkt_loading"] = False
+        state["mkt_updated"] = datetime.now().strftime("%H:%M:%S")
+
+# ─── POLYMARKET ───────────────────────────────────────────────────────────────
+
+def fetch_polymarket(state):
+    url = ("https://gamma-api.polymarket.com/markets"
+           "?limit=200&closed=false&order=volume&ascending=false")
+    try:
+        req = urllib.request.Request(url, headers={
+            "User-Agent": _UA, "Accept": "application/json",
+        })
+        with urllib.request.urlopen(req, timeout=12, context=_SSL_CTX) as r:
+            data = json.loads(r.read())
+        hits = []
+        for m in data:
+            q = (m.get("question") or "").lower()
+            if not any(kw in q for kw in _POLY_KWS):
+                continue
+            prices_raw   = m.get("outcomePrices", "[]")
+            outcomes_raw = m.get("outcomes", "[]")
+            try:
+                prices   = json.loads(prices_raw)   if isinstance(prices_raw, str)   else prices_raw
+                outcomes = json.loads(outcomes_raw)  if isinstance(outcomes_raw, str) else outcomes_raw
+                p0 = float(prices[0]) * 100 if prices else 50.0
+            except Exception:
+                p0, outcomes = 50.0, ["Yes", "No"]
+            chg_raw = m.get("oneHourPriceChange")
+            try:
+                chg_1h = float(chg_raw) * 100 if chg_raw else None
+            except Exception:
+                chg_1h = None
+            end_date = (m.get("endDate") or m.get("end_date_iso") or "")[:10]
+            hits.append({
+                "question": m.get("question", "")[:90],
+                "prob":     round(p0, 1),
+                "outcome":  outcomes[0] if outcomes else "Yes",
+                "chg_1h":   round(chg_1h, 1) if chg_1h is not None else None,
+                "volume":   round(m.get("volumeNum") or 0),
+                "end_date": end_date,
+            })
+        hits.sort(key=lambda x: -x["volume"])
+        with state["lock"]:
+            state["polymarket"] = hits[:25]
+    except Exception:
+        pass
+
+# ─── CORRELATION ──────────────────────────────────────────────────────────────
+
+def compute_correlation(sector_scores_history):
+    """Pearson correlation among sectors over snapshot history."""
+    sectors = list(SECTOR_KEYWORDS.keys())
+    series = {s: [] for s in sectors}
+    for snap in sector_scores_history:
+        sc = snap.get("scores", {})
+        for s in sectors:
+            series[s].append(sc.get(s, 50))
+    def pearson(a, b):
+        n = len(a)
+        if n < 2: return 0.0
+        ma, mb = sum(a)/n, sum(b)/n
+        num = sum((a[i]-ma)*(b[i]-mb) for i in range(n))
+        da  = math.sqrt(sum((x-ma)**2 for x in a))
+        db  = math.sqrt(sum((x-mb)**2 for x in b))
+        if da == 0 or db == 0: return 0.0
+        return round(num/(da*db), 2)
+    matrix = {}
+    for s1 in sectors:
+        matrix[s1] = {}
+        for s2 in sectors:
+            matrix[s1][s2] = pearson(series[s1], series[s2])
+    return {"sectors": sectors, "matrix": matrix}
 
 # ─── HTML TEMPLATE ───────────────────────────────────────────────────────────
 
@@ -371,6 +574,37 @@ body {
 .col-src { color: #00bcd4; width: 90px; }
 .col-sect { width: 95px; color: #888; font-size: 11px; }
 .col-theme { width: 90px; font-size: 11px; }
+
+/* ── Mkt tab ──────────────────────────────────────────────────────────── */
+#mkt-body { display: flex; flex-direction: column; gap: 20px; }
+.mkt-section h3 { color: #555; font-size: 11px; text-transform: uppercase;
+                  letter-spacing: 1px; margin-bottom: 6px; }
+#mkt-table, #poly-table { width: 100%; border-collapse: collapse; }
+#mkt-table th, #poly-table th {
+  color: #555; font-size: 11px; padding: 4px 8px;
+  border-bottom: 1px solid #222; cursor: pointer; white-space: nowrap;
+  user-select: none;
+}
+#mkt-table th:hover, #poly-table th:hover { color: #aaa; }
+#mkt-table td, #poly-table td { padding: 5px 8px; border-bottom: 1px solid #111; font-size: 12px; }
+#mkt-table tr:hover td, #poly-table tr:hover td { background: #141f22; }
+.cat-label { color: #444; font-size: 10px; }
+.mkt-price { color: #e0e0e0; font-weight: bold; }
+.chg-pos { color: #4caf50; }
+.chg-neg { color: #f44336; }
+.chg-neu { color: #888; }
+.sparkline { display: inline-flex; align-items: flex-end; gap: 1px; height: 18px; }
+.spark-bar { width: 4px; background: #555; border-radius: 1px 1px 0 0; }
+/* Filter badge */
+#news-filter-bar { display:flex; align-items:center; gap:8px; padding: 4px 0 8px;
+                   font-size: 11px; color: #888; min-height: 24px; }
+#news-filter-bar span { color: #00bcd4; }
+#clear-filter { cursor:pointer; color:#f44336; padding: 2px 6px;
+                border: 1px solid #333; border-radius: 3px; font-size: 10px; }
+/* Correlation grid */
+.corr-grid { display: grid; font-size: 10px; }
+.corr-cell { padding: 3px; text-align: center; }
+.corr-header { color: #555; font-size: 9px; }
 
 /* ── Sectors tab ──────────────────────────────────────────────────────── */
 .sector-row { margin-bottom: 16px; }
@@ -482,8 +716,9 @@ body {
   <span class="brand">TradeBot</span>
   <span class="dtab active" data-tab="news"     onclick="switchTab('news')">[1] News</span>
   <span class="dtab"        data-tab="sectors"  onclick="switchTab('sectors')">[2] Sectors</span>
-  <span class="dtab"        data-tab="watchlist" onclick="switchTab('watchlist')">[3] Watchlist</span>
-  <span class="dtab"        data-tab="chart"    onclick="switchTab('chart')">[4] Chart</span>
+  <span class="dtab"        data-tab="mkt"      onclick="switchTab('mkt')">[3] Mkt</span>
+  <span class="dtab"        data-tab="watchlist" onclick="switchTab('watchlist')">[4] Watchlist</span>
+  <span class="dtab"        data-tab="chart"    onclick="switchTab('chart')">[5] Chart</span>
   <span id="status">loading…</span>
 </div>
 
@@ -496,11 +731,11 @@ body {
       <div id="news-list-col">
         <table id="news-table">
           <thead><tr>
-            <th class="col-age">Age</th>
-            <th class="col-src">Source</th>
-            <th>Signal</th>
-            <th class="col-sect">Sector</th>
-            <th class="col-theme">Theme</th>
+            <th class="col-age" onclick="sortNews('age')" style="cursor:pointer" title="Sort by age">Age ⇅</th>
+            <th class="col-src" onclick="filterNews('source')" style="cursor:pointer" title="Click row to filter by source">Source ⇅</th>
+            <th onclick="sortNews('signal')" style="cursor:pointer" title="Sort by signal">Signal ⇅</th>
+            <th class="col-sect" onclick="filterNews('sector')" style="cursor:pointer" title="Click row to filter by sector">Sector ⇅</th>
+            <th class="col-theme" onclick="filterNews('theme')" style="cursor:pointer" title="Click row to filter by theme">Theme ⇅</th>
             <th>Headline</th>
           </tr></thead>
           <tbody id="news-body">
@@ -517,6 +752,11 @@ body {
   <!-- Sectors -->
   <div class="panel" id="panel-sectors">
     <div id="sectors-body"><div class="loading-msg">Loading…</div></div>
+  </div>
+
+  <!-- Mkt -->
+  <div class="panel" id="panel-mkt">
+    <div id="mkt-body"><div class="loading-msg">Loading market data…</div></div>
   </div>
 
   <!-- Watchlist -->
@@ -550,6 +790,9 @@ body {
   <button class="bnav-btn"       data-tab="sectors"   onclick="switchTab('sectors')">
     <span class="bnav-icon">🗂️</span>Sectors
   </button>
+  <button class="bnav-btn"       data-tab="mkt"       onclick="switchTab('mkt')">
+    <span class="bnav-icon">📈</span>Mkt
+  </button>
   <button class="bnav-btn"       data-tab="watchlist" onclick="switchTab('watchlist')">
     <span class="bnav-icon">👁️</span>Watch
   </button>
@@ -562,6 +805,10 @@ body {
 'use strict';
 let appData = null;
 let selectedIdx = 0;
+let newsSort = {col: 'age', asc: true};
+let newsFilter = {col: null, val: null};
+let mktSort = {col: 'category', asc: true};
+let polySort = {col: 'volume', asc: false};
 
 /* ── Tab switching (syncs desktop tabs + mobile bottom nav) ── */
 function switchTab(name) {
@@ -582,33 +829,94 @@ function esc(s) {
 
 /* ── News ── */
 function renderNews(news) {
+  // Apply filter
+  let filtered = news;
+  if (newsFilter.col && newsFilter.val) {
+    filtered = news.filter(a => (a[newsFilter.col]||'').toLowerCase() === newsFilter.val.toLowerCase());
+  }
+  // Apply sort
+  const col = newsSort.col;
+  filtered = [...filtered].sort((a, b) => {
+    let va = a[col] ?? '', vb = b[col] ?? '';
+    if (col === 'age') { va = ageSecs(va); vb = ageSecs(vb); }
+    if (col === 'sentiment') { va = Number(va); vb = Number(vb); }
+    if (va < vb) return newsSort.asc ? -1 : 1;
+    if (va > vb) return newsSort.asc ? 1 : -1;
+    return 0;
+  });
+
+  // Update filter bar
+  let filterBar = document.getElementById('news-filter-bar');
+  if (!filterBar) {
+    filterBar = document.createElement('div');
+    filterBar.id = 'news-filter-bar';
+    document.getElementById('news-list-col').insertBefore(filterBar, document.getElementById('news-table'));
+  }
+  if (newsFilter.col) {
+    filterBar.innerHTML = 'Filtered by <span>' + newsFilter.col + ' = ' + esc(newsFilter.val) + '</span> (' + filtered.length + ' articles) <span id="clear-filter" onclick="clearFilter()">✕ clear</span>';
+  } else {
+    filterBar.innerHTML = filtered.length + ' articles &nbsp;·&nbsp; click a theme/sector/signal cell to filter';
+  }
+
   const tbody = document.getElementById('news-body');
   tbody.innerHTML = '';
-  news.forEach((a, i) => {
+  const themeColor = {geopolitics:'#e74c3c',macro:'#f1c40f',crypto:'#1abc9c',markets:'#ecf0f1'};
+  filtered.forEach((a, i) => {
     const tr = document.createElement('tr');
     if (i === selectedIdx) tr.classList.add('selected');
-    const themeColor = {geopolitics:'#e74c3c',macro:'#f1c40f',crypto:'#1abc9c',markets:'#ecf0f1'};
     const trumpStyle = a.is_trump ? ' style="color:#c678dd;font-weight:bold"' : '';
     tr.innerHTML =
       '<td class="col-age">' + a.age + '</td>' +
-      '<td class="col-src">' + esc(a.source) + '</td>' +
-      '<td class="' + sigClass(a.signal) + '">' + a.signal + '</td>' +
-      '<td class="col-sect">' + esc(a.sector) + '</td>' +
-      '<td class="col-theme" style="color:' + (themeColor[a.theme]||'#ecf0f1') + ';font-weight:bold">' + esc(a.theme||'markets') + '</td>' +
+      '<td class="col-src" onclick="applyFilter(event,\'source\',\'' + esc(a.source) + '\')" style="cursor:pointer">' + esc(a.source) + '</td>' +
+      '<td class="' + sigClass(a.signal) + '" onclick="applyFilter(event,\'signal\',\'' + a.signal + '\')" style="cursor:pointer">' + a.signal + '</td>' +
+      '<td class="col-sect" onclick="applyFilter(event,\'sector\',\'' + esc(a.sector) + '\')" style="cursor:pointer">' + esc(a.sector) + '</td>' +
+      '<td class="col-theme" style="color:' + (themeColor[a.theme]||'#ecf0f1') + ';font-weight:bold;cursor:pointer" onclick="applyFilter(event,\'theme\',\'' + a.theme + '\')">' + esc(a.theme||'markets') + '</td>' +
       '<td' + trumpStyle + '>' + esc(a.title) + '</td>';
-    tr.onclick = () => {
+    tr.onclick = (e) => {
+      if (e.target.tagName === 'TD' && e.target.onclick && e.target !== tr.lastElementChild) return;
       selectedIdx = i;
       document.querySelectorAll('#news-table tr').forEach((r,ri) =>
         r.classList.toggle('selected', ri === i + 1));
       renderDetail(a);
-      // Scroll to detail panel on mobile
       setTimeout(() => document.getElementById('news-detail').scrollIntoView({behavior:'smooth', block:'nearest'}), 50);
     };
     tbody.appendChild(tr);
   });
-  if (news.length > 0 && selectedIdx < news.length) {
-    renderDetail(news[selectedIdx]);
-  }
+  if (filtered.length > 0) renderDetail(filtered[Math.min(selectedIdx, filtered.length-1)]);
+}
+
+function ageSecs(age) {
+  if (!age || age === '?') return 999999;
+  const n = parseInt(age);
+  if (age.endsWith('s')) return n;
+  if (age.endsWith('m')) return n * 60;
+  if (age.endsWith('h')) return n * 3600;
+  if (age.endsWith('d')) return n * 86400;
+  return 999999;
+}
+
+function sortNews(col) {
+  if (newsSort.col === col) newsSort.asc = !newsSort.asc;
+  else { newsSort.col = col; newsSort.asc = true; }
+  if (appData) renderNews(appData.news);
+}
+
+function applyFilter(e, col, val) {
+  e.stopPropagation();
+  newsFilter = {col, val};
+  selectedIdx = 0;
+  if (appData) renderNews(appData.news);
+}
+
+function filterNews(col) {
+  // Header click: clear filter for that column or prompt
+  if (newsFilter.col === col) clearFilter();
+}
+
+function clearFilter() {
+  newsFilter = {col: null, val: null};
+  selectedIdx = 0;
+  if (appData) renderNews(appData.news);
 }
 
 function renderDetail(a) {
@@ -675,8 +983,117 @@ function renderWatchlist(recs) {
     rows || '<tr><td colspan="5" class="loading-msg">No data</td></tr>';
 }
 
+/* ── Mkt ── */
+function renderMkt(data) {
+  const mkt = data.mkt_data || [];
+  const poly = data.polymarket || [];
+
+  // Sort market data
+  const mktSorted = [...mkt].sort((a, b) => {
+    let va = a[mktSort.col] ?? '', vb = b[mktSort.col] ?? '';
+    if (typeof va === 'number' || mktSort.col === 'chg_pct') { va = va??-9999; vb = vb??-9999; }
+    if (va < vb) return mktSort.asc ? -1 : 1;
+    if (va > vb) return mktSort.asc ? 1 : -1;
+    return 0;
+  });
+
+  // Build mkt table
+  const mktRows = mktSorted.map(r => {
+    const price = r.price != null ? r.price.toLocaleString(undefined, {maximumFractionDigits:2}) : '—';
+    const chgVal = r.chg_pct;
+    const chgStr = chgVal != null ? (chgVal >= 0 ? '+' : '') + chgVal.toFixed(2) + '%' : '—';
+    const chgCls = chgVal == null ? 'chg-neu' : chgVal > 0 ? 'chg-pos' : chgVal < 0 ? 'chg-neg' : 'chg-neu';
+    const spark = buildSparkline(r.closes || []);
+    return '<tr>' +
+      '<td style="color:#00bcd4;font-weight:bold">' + esc(r.symbol) + '</td>' +
+      '<td style="color:#666;font-size:11px">' + esc(r.name) + '</td>' +
+      '<td class="cat-label">' + r.category + '</td>' +
+      '<td class="mkt-price">' + price + '</td>' +
+      '<td class="' + chgCls + '">' + chgStr + '</td>' +
+      '<td>' + spark + '</td>' +
+    '</tr>';
+  }).join('');
+
+  const mktUpdated = data.mkt_updated ? ' · Updated ' + data.mkt_updated : '';
+  const mktHtml =
+    '<div class="mkt-section">' +
+      '<h3>Live Markets' + mktUpdated + '</h3>' +
+      '<div style="overflow-x:auto">' +
+      '<table id="mkt-table"><thead><tr>' +
+        '<th onclick="sortMkt(\'symbol\')">Symbol ⇅</th>' +
+        '<th onclick="sortMkt(\'name\')">Name ⇅</th>' +
+        '<th onclick="sortMkt(\'category\')">Cat ⇅</th>' +
+        '<th onclick="sortMkt(\'price\')">Price ⇅</th>' +
+        '<th onclick="sortMkt(\'chg_pct\')">Day% ⇅</th>' +
+        '<th>5D</th>' +
+      '</tr></thead><tbody>' + mktRows + '</tbody></table></div></div>';
+
+  // Sort polymarket
+  const polySorted = [...poly].sort((a, b) => {
+    let va = a[polySort.col] ?? '', vb = b[polySort.col] ?? '';
+    if (va < vb) return polySort.asc ? -1 : 1;
+    if (va > vb) return polySort.asc ? 1 : -1;
+    return 0;
+  });
+
+  const polyRows = polySorted.map(r => {
+    const probCls = r.prob >= 60 ? 'c-pos' : r.prob <= 40 ? 'c-neg' : 'c-neu';
+    const chgStr = r.chg_1h != null ? (r.chg_1h >= 0 ? '+' : '') + r.chg_1h.toFixed(1) + '%' : '—';
+    const chgCls = r.chg_1h == null ? 'chg-neu' : r.chg_1h > 0 ? 'chg-pos' : r.chg_1h < 0 ? 'chg-neg' : 'chg-neu';
+    const vol = r.volume >= 1000000 ? '$' + (r.volume/1000000).toFixed(1) + 'M'
+               : r.volume >= 1000 ? '$' + (r.volume/1000).toFixed(0) + 'K' : '$' + r.volume;
+    return '<tr>' +
+      '<td style="color:#c8c8c8">' + esc(r.question) + '</td>' +
+      '<td class="' + probCls + '" style="font-weight:bold;white-space:nowrap">' + r.prob.toFixed(1) + '% ' + esc(r.outcome||'Yes') + '</td>' +
+      '<td class="' + chgCls + '">' + chgStr + '</td>' +
+      '<td style="color:#555">' + vol + '</td>' +
+      '<td style="color:#444;font-size:10px">' + (r.end_date||'—') + '</td>' +
+    '</tr>';
+  }).join('') || '<tr><td colspan="5" class="loading-msg">No Polymarket data</td></tr>';
+
+  const polyHtml =
+    '<div class="mkt-section">' +
+      '<h3>Polymarket Prediction Markets (finance/macro)</h3>' +
+      '<div style="overflow-x:auto">' +
+      '<table id="poly-table"><thead><tr>' +
+        '<th onclick="sortPoly(\'question\')">Question ⇅</th>' +
+        '<th onclick="sortPoly(\'prob\')">Prob ⇅</th>' +
+        '<th onclick="sortPoly(\'chg_1h\')">1h Chg ⇅</th>' +
+        '<th onclick="sortPoly(\'volume\')">Volume ⇅</th>' +
+        '<th onclick="sortPoly(\'end_date\')">Closes ⇅</th>' +
+      '</tr></thead><tbody>' + polyRows + '</tbody></table></div></div>';
+
+  document.getElementById('mkt-body').innerHTML = mktHtml + polyHtml;
+}
+
+function buildSparkline(closes) {
+  if (!closes || closes.length < 2) return '<span style="color:#333">—</span>';
+  const min = Math.min(...closes), max = Math.max(...closes);
+  const range = max - min || 1;
+  const first = closes[0], last = closes[closes.length-1];
+  const up = last >= first;
+  return '<div class="sparkline">' +
+    closes.map(c => {
+      const h = Math.round(((c - min) / range) * 16) + 2;
+      return '<div class="spark-bar" style="height:' + h + 'px;background:' + (up ? '#4caf50' : '#f44336') + '"></div>';
+    }).join('') +
+  '</div>';
+}
+
+function sortMkt(col) {
+  if (mktSort.col === col) mktSort.asc = !mktSort.asc;
+  else { mktSort.col = col; mktSort.asc = true; }
+  if (appData) renderMkt(appData);
+}
+
+function sortPoly(col) {
+  if (polySort.col === col) polySort.asc = !polySort.asc;
+  else { polySort.col = col; polySort.asc = false; }
+  if (appData) renderMkt(appData);
+}
+
 /* ── Chart ── */
-function renderChart(sector_scores, recs) {
+function renderChart(sector_scores, recs, correlation) {
   const items = Object.entries(sector_scores);
   const maxH = 120;
 
@@ -701,11 +1118,46 @@ function renderChart(sector_scores, recs) {
     '</div>';
   }).join('');
 
+  // Correlation grid
+  let corrHtml = '';
+  if (correlation && correlation.sectors && correlation.sectors.length > 1) {
+    const secs = correlation.sectors;
+    const mat  = correlation.matrix;
+    const abbr = s => s.length > 6 ? s.slice(0,6) : s;
+    const corrColor = v => {
+      if (v >= 0.5)  return '#1b5e20'; // strong positive — dark green
+      if (v >= 0.2)  return '#388e3c'; // mild positive — green
+      if (v >= -0.2) return '#f57f17'; // neutral — amber/yellow
+      if (v >= -0.5) return '#c62828'; // mild negative — red
+      return '#b71c1c';                // strong negative — dark red
+    };
+    const n = secs.length;
+    let rows = '<div class="corr-grid" style="grid-template-columns: repeat(' + (n+1) + ', 1fr); gap:1px;">';
+    // Header row
+    rows += '<div class="corr-cell corr-header"></div>';
+    secs.forEach(s => rows += '<div class="corr-cell corr-header" title="' + s + '">' + abbr(s) + '</div>');
+    // Data rows
+    secs.forEach(s1 => {
+      rows += '<div class="corr-cell corr-header" title="' + s1 + '">' + abbr(s1) + '</div>';
+      secs.forEach(s2 => {
+        const v = mat[s1][s2];
+        const bg = corrColor(v);
+        const txt = s1 === s2 ? '1.0' : v.toFixed(2);
+        rows += '<div class="corr-cell" style="background:' + bg + ';color:#fff;font-size:9px" title="' + s1 + ' vs ' + s2 + '">' + txt + '</div>';
+      });
+    });
+    rows += '</div>';
+    corrHtml = '<div class="chart-section"><h3>Sector Correlation <span style="color:#444;font-size:10px">(green=positive · yellow=neutral · red=negative)</span></h3>' + rows + '</div>';
+  } else {
+    corrHtml = '<div class="chart-section"><h3>Sector Correlation</h3><div class="loading-msg" style="font-size:11px">Accumulating snapshots — correlation appears after 2+ data points (every 30 min)</div></div>';
+  }
+
   document.getElementById('chart-body').innerHTML =
     '<div id="chart-wrap">' +
       '<div class="chart-section"><h3>Sentiment by sector</h3>' +
         '<div class="bar-chart">' + barCols + '</div></div>' +
       '<div class="chart-section"><h3>ETF conviction</h3>' + horizBars + '</div>' +
+      corrHtml +
     '</div>';
 }
 
@@ -719,8 +1171,9 @@ async function loadData() {
       : 'Updated ' + data.last_update + '  ·  ' + data.news.length + ' articles';
     renderNews(data.news);
     renderSectors(data.sector_scores, data.news);
+    renderMkt(data);
     renderWatchlist(data.etf_recs);
-    renderChart(data.sector_scores, data.etf_recs);
+    renderChart(data.sector_scores, data.etf_recs, data.correlation || {});
   } catch(e) {
     document.getElementById('status').textContent = 'Network error';
   }
@@ -741,6 +1194,11 @@ _state = {
     "error": None,
     "last_update": None,
     "lock": threading.Lock(),
+    "mkt_data":    [],
+    "mkt_loading": False,
+    "mkt_updated": None,
+    "polymarket":  [],
+    "history":     _load_history_web(),
 }
 
 class Handler(BaseHTTPRequestHandler):
@@ -767,6 +1225,9 @@ class Handler(BaseHTTPRequestHandler):
             loading = _state["loading"]
             last_update = _state["last_update"]
             error = _state["error"]
+            mkt_data    = list(_state["mkt_data"])
+            polymarket  = list(_state["polymarket"])
+            history     = list(_state["history"])
 
         sector_scores = compute_sector_scores(news)
         etf_recs = compute_etf_recommendations(sector_scores)
@@ -780,6 +1241,11 @@ class Handler(BaseHTTPRequestHandler):
             "sector_scores": sector_scores,
             "etf_recs": etf_recs,
             "etfs_by_sector": etfs_by_sector,
+            "mkt_data":    mkt_data,
+            "mkt_loading": _state["mkt_loading"],
+            "mkt_updated": _state["mkt_updated"] or "",
+            "polymarket":  polymarket,
+            "correlation": compute_correlation(history) if len(history) >= 2 else {},
         }).encode("utf-8")
 
         self.send_response(200)
@@ -798,9 +1264,13 @@ def auto_refresh():
             if not _state["loading"]:
                 _state["loading"] = True
         threading.Thread(target=bg_fetch, daemon=True).start()
+        threading.Thread(target=fetch_mkt_data, args=(_state,), daemon=True).start()
+        threading.Thread(target=fetch_polymarket, args=(_state,), daemon=True).start()
 
 if __name__ == "__main__":
     threading.Thread(target=bg_fetch, daemon=True).start()
+    threading.Thread(target=fetch_mkt_data, args=(_state,), daemon=True).start()
+    threading.Thread(target=fetch_polymarket, args=(_state,), daemon=True).start()
     threading.Thread(target=auto_refresh, daemon=True).start()
 
     server = HTTPServer(("0.0.0.0", PORT), Handler)
