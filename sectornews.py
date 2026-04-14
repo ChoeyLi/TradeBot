@@ -425,8 +425,20 @@ def _fetch_chart(ticker, retries=2):
             res    = d["chart"]["result"][0]
             meta   = res["meta"]
             closes = [c for c in res["indicators"]["quote"][0].get("close", []) if c]
+            timestamps = res.get("timestamp", [])
             price  = meta.get("regularMarketPrice")
-            prev   = meta.get("chartPreviousClose") or (closes[-2] if len(closes) >= 2 else None)
+            # Use timestamps to find yesterday's close correctly.
+            # chartPreviousClose is the close before the 5-day window — NOT yesterday.
+            prev = None
+            if closes:
+                if timestamps:
+                    from datetime import date as _date
+                    last_bar_date = _date.fromtimestamp(timestamps[-1])
+                    prev = closes[-2] if last_bar_date == _date.today() and len(closes) >= 2 else closes[-1]
+                elif price and len(closes) >= 2 and abs(closes[-1] - price) / price < 0.005:
+                    prev = closes[-2]   # last bar ≈ current price → it's today
+                else:
+                    prev = closes[-1]
             chg    = round(((price - prev) / prev * 100), 2) if price and prev else None
             price  = round(price, 2) if price else None
             return price, chg, closes

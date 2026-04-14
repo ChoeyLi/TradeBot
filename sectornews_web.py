@@ -379,11 +379,26 @@ def _fetch_chart(ticker, retries=2):
                 capture_output=True, timeout=12,
             )
             d = json.loads(r.stdout)
-            res = d["chart"]["result"][0]
-            meta = res["meta"]
+            res    = d["chart"]["result"][0]
+            meta   = res["meta"]
             closes = [c for c in res["indicators"]["quote"][0].get("close", []) if c]
-            price = meta.get("regularMarketPrice")
-            prev  = meta.get("chartPreviousClose") or (closes[-2] if len(closes) >= 2 else None)
+            timestamps = res.get("timestamp", [])
+            price  = meta.get("regularMarketPrice")
+            # Determine yesterday's close correctly:
+            # If last bar's date == today, prev = closes[-2]; else prev = closes[-1]
+            prev = None
+            if closes:
+                if timestamps:
+                    from datetime import date as _date
+                    last_bar_date = _date.fromtimestamp(timestamps[-1])
+                    today = _date.today()
+                    prev = closes[-2] if last_bar_date == today and len(closes) >= 2 else closes[-1]
+                else:
+                    # Fallback: if last close ≈ current price, bar is today → use closes[-2]
+                    if price and len(closes) >= 2 and abs(closes[-1] - price) / price < 0.005:
+                        prev = closes[-2]
+                    else:
+                        prev = closes[-1]
             chg   = round(((price - prev) / prev * 100), 2) if price and prev else None
             price = round(price, 2) if price else None
             return price, chg, closes
