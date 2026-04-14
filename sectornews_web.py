@@ -1313,8 +1313,19 @@ if __name__ == "__main__":
     threading.Thread(target=fetch_polymarket, args=(_state,), daemon=True).start()
     threading.Thread(target=auto_refresh, daemon=True).start()
 
+    # Kill any stale process on the port before binding
+    import socket as _socket
+    try:
+        _sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        _sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        _sock.close()
+    except Exception:
+        pass
+
+    HTTPServer.allow_reuse_address = True
     server = HTTPServer(("0.0.0.0", PORT), Handler)
-    print(f"sectornews web running on http://localhost:{PORT}")
+    print(f"TradeBot web running on http://localhost:{PORT}")
+    print(f"  Local network:  http://{_socket.gethostbyname(_socket.gethostname())}:{PORT}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
