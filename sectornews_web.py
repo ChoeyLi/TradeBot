@@ -16,6 +16,8 @@ import sys
 import ssl
 import http.cookiejar as _cookiejar
 import math
+import subprocess
+import urllib.parse
 from datetime import datetime, timezone
 from collections import defaultdict
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -316,7 +318,7 @@ def fetch_all_news(state):
         t.join()
 
     all_articles = [a for batch in results for a in batch]
-    all_articles.sort(key=lambda x: x.get("pub",""), reverse=True)
+    all_articles.sort(key=lambda x: _age_secs(x.get("age","?")))
     with state["lock"]:
         state["news"]        = all_articles[:60]
         state["loading"]     = False
@@ -365,59 +367,39 @@ def _save_snapshot_web(state):
 
 # ─── YAHOO FINANCE MARKET DATA ────────────────────────────────────────────────
 
-def _make_yf_opener():
-    cj = _cookiejar.CookieJar()
-    opener = urllib.request.build_opener(
-        urllib.request.HTTPSHandler(context=_SSL_CTX),
-        urllib.request.HTTPCookieProcessor(cj),
-    )
-    opener.addheaders = [
-        ("User-Agent", _UA),
-        ("Accept", "application/json"),
-        ("Accept-Language", "en-US,en;q=0.9"),
-        ("Referer", "https://finance.yahoo.com/"),
-    ]
-    return opener
-
-def _fetch_chart(opener, ticker, retries=2):
-    sym_enc = urllib.request.quote(ticker)
-    url = (f"https://query1.finance.yahoo.com/v8/finance/chart/{sym_enc}"
-           f"?interval=1d&range=5d")
+def _fetch_chart(ticker, retries=2):
+    """Yahoo Finance v7 chart via curl — avoids Python urllib 429 fingerprinting."""
+    sym_enc = urllib.parse.quote(ticker)
+    url = (f"https://query1.finance.yahoo.com/v7/finance/chart/{sym_enc}"
+           f"?range=5d&interval=1d")
     for attempt in range(retries):
         try:
-            resp = opener.open(url, timeout=10)
-            d = json.loads(resp.read())
+            r = subprocess.run(
+                ["curl", "-s", "-m", "10", "-A", "Mozilla/5.0", url],
+                capture_output=True, timeout=12,
+            )
+            d = json.loads(r.stdout)
             res = d["chart"]["result"][0]
             meta = res["meta"]
             closes = [c for c in res["indicators"]["quote"][0].get("close", []) if c]
             price = meta.get("regularMarketPrice")
             prev  = meta.get("chartPreviousClose") or (closes[-2] if len(closes) >= 2 else None)
-            chg   = ((price - prev) / prev * 100) if price and prev else None
+            chg   = round(((price - prev) / prev * 100), 2) if price and prev else None
+            price = round(price, 2) if price else None
             return price, chg, closes
         except Exception:
             if attempt < retries - 1:
-                time.sleep(0.5)
+                time.sleep(1.0)
     return None, None, []
 
 def fetch_mkt_data(state):
-    opener = _make_yf_opener()
-    rows = [None] * len(MKT_SYMBOLS)
-    def _fetch_one(i, display, name, ticker, cat):
-        price, chg, closes = _fetch_chart(opener, ticker)
-        rows[i] = {"symbol": display, "name": name, "ticker": ticker,
-                   "category": cat, "price": price, "chg_pct": chg, "closes": closes}
-    threads = []
-    for i, sym in enumerate(MKT_SYMBOLS):
-        t = threading.Thread(target=_fetch_one, args=(i, *sym), daemon=True)
-        threads.append(t)
-        t.start()
-        time.sleep(0.05)
-    for t in threads:
-        t.join(timeout=15)
-    for i, sym in enumerate(MKT_SYMBOLS):
-        if rows[i] is None:
-            rows[i] = {"symbol": sym[0], "name": sym[1], "ticker": sym[2],
-                       "category": sym[3], "price": None, "chg_pct": None, "closes": []}
+    """Fetch sequentially with 0.4s gaps to stay under Yahoo rate limits."""
+    rows = []
+    for display, name, ticker, cat in MKT_SYMBOLS:
+        price, chg, closes = _fetch_chart(ticker)
+        rows.append({"symbol": display, "name": name, "ticker": ticker,
+                     "category": cat, "price": price, "chg_pct": chg, "closes": closes})
+        time.sleep(0.4)
     with state["lock"]:
         state["mkt_data"]    = rows
         state["mkt_loading"] = False
@@ -599,8 +581,8 @@ body {
 #news-filter-bar { display:flex; align-items:center; gap:8px; padding: 4px 0 8px;
                    font-size: 11px; color: #888; min-height: 24px; }
 #news-filter-bar span { color: #00bcd4; }
-#clear-filter { cursor:pointer; color:#f44336; padding: 2px 6px;
-                border: 1px solid #333; border-radius: 3px; font-size: 10px; }
+#clear-filter { cursor:pointer; color:#f44336; padding: 2px 6px; background:transparent;
+                border: 1px solid #333; border-radius: 3px; font-size: 10px; font-family: inherit; }
 /* Correlation grid */
 .corr-grid { display: grid; font-size: 10px; }
 .corr-cell { padding: 3px; text-align: center; }
@@ -828,62 +810,9 @@ function esc(s) {
 }
 
 /* ── News ── */
-function renderNews(news) {
-  // Apply filter
-  let filtered = news;
-  if (newsFilter.col && newsFilter.val) {
-    filtered = news.filter(a => (a[newsFilter.col]||'').toLowerCase() === newsFilter.val.toLowerCase());
-  }
-  // Apply sort
-  const col = newsSort.col;
-  filtered = [...filtered].sort((a, b) => {
-    let va = a[col] ?? '', vb = b[col] ?? '';
-    if (col === 'age') { va = ageSecs(va); vb = ageSecs(vb); }
-    if (col === 'sentiment') { va = Number(va); vb = Number(vb); }
-    if (va < vb) return newsSort.asc ? -1 : 1;
-    if (va > vb) return newsSort.asc ? 1 : -1;
-    return 0;
-  });
-
-  // Update filter bar
-  let filterBar = document.getElementById('news-filter-bar');
-  if (!filterBar) {
-    filterBar = document.createElement('div');
-    filterBar.id = 'news-filter-bar';
-    document.getElementById('news-list-col').insertBefore(filterBar, document.getElementById('news-table'));
-  }
-  if (newsFilter.col) {
-    filterBar.innerHTML = 'Filtered by <span>' + newsFilter.col + ' = ' + esc(newsFilter.val) + '</span> (' + filtered.length + ' articles) <span id="clear-filter" onclick="clearFilter()">✕ clear</span>';
-  } else {
-    filterBar.innerHTML = filtered.length + ' articles &nbsp;·&nbsp; click a theme/sector/signal cell to filter';
-  }
-
-  const tbody = document.getElementById('news-body');
-  tbody.innerHTML = '';
-  const themeColor = {geopolitics:'#e74c3c',macro:'#f1c40f',crypto:'#1abc9c',markets:'#ecf0f1'};
-  filtered.forEach((a, i) => {
-    const tr = document.createElement('tr');
-    if (i === selectedIdx) tr.classList.add('selected');
-    const trumpStyle = a.is_trump ? ' style="color:#c678dd;font-weight:bold"' : '';
-    tr.innerHTML =
-      '<td class="col-age">' + a.age + '</td>' +
-      '<td class="col-src" onclick="applyFilter(event,\'source\',\'' + esc(a.source) + '\')" style="cursor:pointer">' + esc(a.source) + '</td>' +
-      '<td class="' + sigClass(a.signal) + '" onclick="applyFilter(event,\'signal\',\'' + a.signal + '\')" style="cursor:pointer">' + a.signal + '</td>' +
-      '<td class="col-sect" onclick="applyFilter(event,\'sector\',\'' + esc(a.sector) + '\')" style="cursor:pointer">' + esc(a.sector) + '</td>' +
-      '<td class="col-theme" style="color:' + (themeColor[a.theme]||'#ecf0f1') + ';font-weight:bold;cursor:pointer" onclick="applyFilter(event,\'theme\',\'' + a.theme + '\')">' + esc(a.theme||'markets') + '</td>' +
-      '<td' + trumpStyle + '>' + esc(a.title) + '</td>';
-    tr.onclick = (e) => {
-      if (e.target.tagName === 'TD' && e.target.onclick && e.target !== tr.lastElementChild) return;
-      selectedIdx = i;
-      document.querySelectorAll('#news-table tr').forEach((r,ri) =>
-        r.classList.toggle('selected', ri === i + 1));
-      renderDetail(a);
-      setTimeout(() => document.getElementById('news-detail').scrollIntoView({behavior:'smooth', block:'nearest'}), 50);
-    };
-    tbody.appendChild(tr);
-  });
-  if (filtered.length > 0) renderDetail(filtered[Math.min(selectedIdx, filtered.length-1)]);
-}
+// col index → field mapping: 0=age, 1=source, 2=signal, 3=sector, 4=theme, 5=headline
+const NEWS_COLS = ['age','source','signal','sector','theme','title'];
+const FILTERABLE = new Set([1,2,3,4]); // source, signal, sector, theme
 
 function ageSecs(age) {
   if (!age || age === '?') return 999999;
@@ -895,22 +824,100 @@ function ageSecs(age) {
   return 999999;
 }
 
+function renderNews(news) {
+  // Apply filter
+  let filtered = news;
+  if (newsFilter.col && newsFilter.val) {
+    filtered = news.filter(a => String(a[newsFilter.col]||'').toLowerCase() === newsFilter.val.toLowerCase());
+  }
+  // Apply sort
+  const col = newsSort.col;
+  filtered = [...filtered].sort((a, b) => {
+    let va = a[col] ?? '', vb = b[col] ?? '';
+    if (col === 'age') { va = ageSecs(String(va)); vb = ageSecs(String(vb)); }
+    if (col === 'sentiment') { va = Number(va); vb = Number(vb); }
+    if (va < vb) return newsSort.asc ? -1 : 1;
+    if (va > vb) return newsSort.asc ? 1 : -1;
+    return 0;
+  });
+
+  // Update filter bar
+  let filterBar = document.getElementById('news-filter-bar');
+  if (!filterBar) {
+    filterBar = document.createElement('div');
+    filterBar.id = 'news-filter-bar';
+    const listCol = document.getElementById('news-list-col');
+    listCol.insertBefore(filterBar, listCol.firstChild);
+  }
+  if (newsFilter.col) {
+    filterBar.innerHTML = 'Filtered: <span>' + newsFilter.col + ' = ' + esc(newsFilter.val) + '</span>'
+      + ' (' + filtered.length + ') <button id="clear-filter" onclick="clearFilter()">✕ clear</button>';
+  } else {
+    filterBar.innerHTML = filtered.length + ' articles &nbsp;·&nbsp; <span style="color:#555">click signal/theme/sector cell to filter</span>';
+  }
+
+  const themeColor = {geopolitics:'#e74c3c',macro:'#f1c40f',crypto:'#1abc9c',markets:'#ecf0f1'};
+  const tbody = document.getElementById('news-body');
+  tbody.innerHTML = '';
+
+  filtered.forEach((a, i) => {
+    const tr = document.createElement('tr');
+    if (i === selectedIdx) tr.classList.add('selected');
+    const trumpColor = a.is_trump ? 'color:#c678dd;font-weight:bold;' : '';
+    const tColor = themeColor[a.theme] || '#ecf0f1';
+
+    // Build cells manually (no inline onclick — use tr.onclick with col index)
+    const cells = [
+      {cls: 'col-age',  txt: a.age,                            style: ''},
+      {cls: 'col-src',  txt: a.source,                         style: 'cursor:pointer'},
+      {cls: sigClass(a.signal), txt: a.signal,                 style: 'cursor:pointer'},
+      {cls: 'col-sect', txt: a.sector,                         style: 'cursor:pointer'},
+      {cls: 'col-theme',txt: a.theme||'markets',               style: 'color:'+tColor+';font-weight:bold;cursor:pointer'},
+      {cls: '',         txt: a.title,                          style: trumpColor},
+    ];
+    cells.forEach(c => {
+      const td = document.createElement('td');
+      if (c.cls) td.className = c.cls;
+      if (c.style) td.style.cssText = c.style;
+      td.textContent = c.txt;
+      tr.appendChild(td);
+    });
+
+    tr.onclick = (e) => {
+      const td = e.target.closest('td');
+      if (!td) return;
+      const colIdx = Array.from(tr.cells).indexOf(td);
+      if (FILTERABLE.has(colIdx)) {
+        const field = NEWS_COLS[colIdx];
+        const val   = String(a[field] || '');
+        newsFilter = {col: field, val};
+        selectedIdx = 0;
+        renderNews(appData.news);
+        return;
+      }
+      // Headline or age — open detail
+      selectedIdx = i;
+      document.querySelectorAll('#news-table tr').forEach((r, ri) =>
+        r.classList.toggle('selected', ri === i + 1));
+      renderDetail(a);
+      setTimeout(() => document.getElementById('news-detail').scrollIntoView({behavior:'smooth', block:'nearest'}), 50);
+    };
+    tbody.appendChild(tr);
+  });
+
+  if (filtered.length > 0) renderDetail(filtered[Math.min(selectedIdx, filtered.length - 1)]);
+}
+
 function sortNews(col) {
   if (newsSort.col === col) newsSort.asc = !newsSort.asc;
   else { newsSort.col = col; newsSort.asc = true; }
   if (appData) renderNews(appData.news);
 }
 
-function applyFilter(e, col, val) {
-  e.stopPropagation();
-  newsFilter = {col, val};
+function clearFilter() {
+  newsFilter = {col: null, val: null};
   selectedIdx = 0;
   if (appData) renderNews(appData.news);
-}
-
-function filterNews(col) {
-  // Header click: clear filter for that column or prompt
-  if (newsFilter.col === col) clearFilter();
 }
 
 function clearFilter() {
