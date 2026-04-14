@@ -1132,11 +1132,9 @@ function renderChart(sector_scores, recs, correlation) {
     const mat  = correlation.matrix;
     const abbr = s => s.length > 6 ? s.slice(0,6) : s;
     const corrColor = v => {
-      if (v >= 0.5)  return '#1b5e20'; // strong positive — dark green
-      if (v >= 0.2)  return '#388e3c'; // mild positive — green
-      if (v >= -0.2) return '#f57f17'; // neutral — amber/yellow
-      if (v >= -0.5) return '#c62828'; // mild negative — red
-      return '#b71c1c';                // strong negative — dark red
+      if (v > 0.1)  return '#2e7d32'; // green
+      if (v < -0.1) return '#c62828'; // red
+      return '#f57f17';               // yellow — neutral band
     };
     const n = secs.length;
     let rows = '<div class="corr-grid" style="grid-template-columns: repeat(' + (n+1) + ', 1fr); gap:1px;">';
@@ -1154,7 +1152,7 @@ function renderChart(sector_scores, recs, correlation) {
       });
     });
     rows += '</div>';
-    corrHtml = '<div class="chart-section"><h3>Sector Correlation <span style="color:#444;font-size:10px">(green=positive · yellow=neutral · red=negative)</span></h3>' + rows + '</div>';
+    corrHtml = '<div class="chart-section"><h3>Sector Correlation <span style="color:#444;font-size:10px">(🟢 &gt;+0.1 · 🟡 ±0.1 · 🔴 &lt;-0.1)</span></h3>' + rows + '</div>';
   } else {
     corrHtml = '<div class="chart-section"><h3>Sector Correlation</h3><div class="loading-msg" style="font-size:11px">Accumulating snapshots — correlation appears after 2+ data points (every 30 min)</div></div>';
   }

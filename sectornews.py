@@ -1199,7 +1199,7 @@ def draw_chart(win, state):
                         curses.color_pair(C_DIM))
         else:
             safe_addstr(win, div2 + 1, 2,
-                        "Sector Correlation  (Pearson r · green≥+0.5 · red≤-0.5)",
+                        "Sector Correlation  (Pearson r · green>+0.1 · yellow±0.1 · red<-0.1)",
                         curses.color_pair(C_DIM) | curses.A_BOLD)
             abbr    = [s[:4] for s in sectors]
             hdr_row = div2 + 2
@@ -1220,12 +1220,12 @@ def draw_chart(win, state):
                     r_str = f"{r_val:+.2f}"
                     if s1 == s2:
                         attr = curses.color_pair(C_DIM) | curses.A_BOLD
-                    elif r_val >= 0.5:
+                    elif r_val > 0.1:
                         attr = curses.color_pair(C_POS) | curses.A_BOLD
-                    elif r_val <= -0.5:
+                    elif r_val < -0.1:
                         attr = curses.color_pair(C_NEG) | curses.A_BOLD
                     else:
-                        attr = curses.color_pair(C_NEU)
+                        attr = curses.color_pair(C_NEU) | curses.A_BOLD
                     safe_addstr(win, rrow, col, f"{r_str:>5}", attr)
                     col += 5
 
