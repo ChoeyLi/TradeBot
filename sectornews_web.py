@@ -451,29 +451,35 @@ def fetch_polymarket(state):
 
 # ─── CORRELATION ──────────────────────────────────────────────────────────────
 
-def compute_correlation(sector_scores_history):
+def _pearson_web(a, b):
+    n = len(a)
+    if n < 2: return 0.0
+    ma, mb = sum(a)/n, sum(b)/n
+    num = sum((a[i]-ma)*(b[i]-mb) for i in range(n))
+    da  = math.sqrt(sum((x-ma)**2 for x in a))
+    db  = math.sqrt(sum((x-mb)**2 for x in b))
+    if da == 0 or db == 0: return 0.0
+    return round(num/(da*db), 2)
+
+def compute_correlation(history):
     """Pearson correlation among sectors over snapshot history."""
     sectors = list(SECTOR_KEYWORDS.keys())
-    series = {s: [] for s in sectors}
-    for snap in sector_scores_history:
-        sc = snap.get("scores", {})
-        for s in sectors:
-            series[s].append(sc.get(s, 50))
-    def pearson(a, b):
-        n = len(a)
-        if n < 2: return 0.0
-        ma, mb = sum(a)/n, sum(b)/n
-        num = sum((a[i]-ma)*(b[i]-mb) for i in range(n))
-        da  = math.sqrt(sum((x-ma)**2 for x in a))
-        db  = math.sqrt(sum((x-mb)**2 for x in b))
-        if da == 0 or db == 0: return 0.0
-        return round(num/(da*db), 2)
-    matrix = {}
-    for s1 in sectors:
-        matrix[s1] = {}
-        for s2 in sectors:
-            matrix[s1][s2] = pearson(series[s1], series[s2])
+    series = {s: [snap.get("scores", {}).get(s, 50) for snap in history]
+              for s in sectors}
+    matrix = {s1: {s2: _pearson_web(series[s1], series[s2]) for s2 in sectors}
+              for s1 in sectors}
     return {"sectors": sectors, "matrix": matrix}
+
+def compute_etf_correlation(history):
+    """Pearson correlation for top-1 ETF per sector (derived from sector history)."""
+    etf_list = [(etfs[0][0], sector)
+                for sector, etfs in SECTOR_ETFS.items() if etfs]
+    tickers = [t for t, _ in etf_list]
+    series  = {t: [snap.get("scores", {}).get(s, 50) for snap in history]
+               for t, s in etf_list}
+    matrix  = {t1: {t2: _pearson_web(series[t1], series[t2]) for t2 in tickers}
+               for t1 in tickers}
+    return {"tickers": tickers, "matrix": matrix}
 
 # ─── HTML TEMPLATE ───────────────────────────────────────────────────────────
 
@@ -1100,7 +1106,7 @@ function sortPoly(col) {
 }
 
 /* ── Chart ── */
-function renderChart(sector_scores, recs, correlation) {
+function renderChart(sector_scores, recs, correlation, etf_correlation) {
   const items = Object.entries(sector_scores);
   const maxH = 120;
 
@@ -1125,36 +1131,47 @@ function renderChart(sector_scores, recs, correlation) {
     '</div>';
   }).join('');
 
-  // Correlation grid
-  let corrHtml = '';
-  if (correlation && correlation.sectors && correlation.sectors.length > 1) {
-    const secs = correlation.sectors;
-    const mat  = correlation.matrix;
-    const abbr = s => s.length > 6 ? s.slice(0,6) : s;
-    const corrColor = v => {
-      if (v > 0.1)  return '#2e7d32'; // green
-      if (v < -0.1) return '#c62828'; // red
-      return '#f57f17';               // yellow — neutral band
-    };
-    const n = secs.length;
-    let rows = '<div class="corr-grid" style="grid-template-columns: repeat(' + (n+1) + ', 1fr); gap:1px;">';
-    // Header row
-    rows += '<div class="corr-cell corr-header"></div>';
-    secs.forEach(s => rows += '<div class="corr-cell corr-header" title="' + s + '">' + abbr(s) + '</div>');
-    // Data rows
-    secs.forEach(s1 => {
-      rows += '<div class="corr-cell corr-header" title="' + s1 + '">' + abbr(s1) + '</div>';
-      secs.forEach(s2 => {
+  // ── Correlation heatmaps ──
+  const corrColor = v => v > 0.1 ? '#2e7d32' : v < -0.1 ? '#c62828' : '#f57f17';
+  const legend = '<span style="color:#444;font-size:10px">(🟢 &gt;+0.1 · 🟡 ±0.1 · 🔴 &lt;-0.1)</span>';
+
+  function buildHeatmap(labels, mat, abbr) {
+    const n = labels.length;
+    let g = '<div class="corr-grid" style="grid-template-columns: repeat(' + (n+1) + ', 1fr); gap:1px; min-width:' + ((n+1)*44) + 'px">';
+    g += '<div class="corr-cell corr-header"></div>';
+    labels.forEach(s => g += '<div class="corr-cell corr-header" title="' + s + '">' + abbr(s) + '</div>');
+    labels.forEach(s1 => {
+      g += '<div class="corr-cell corr-header" title="' + s1 + '">' + abbr(s1) + '</div>';
+      labels.forEach(s2 => {
         const v = mat[s1][s2];
-        const bg = corrColor(v);
-        const txt = s1 === s2 ? '1.0' : v.toFixed(2);
-        rows += '<div class="corr-cell" style="background:' + bg + ';color:#fff;font-size:9px" title="' + s1 + ' vs ' + s2 + '">' + txt + '</div>';
+        const txt = s1 === s2 ? ' 1.0' : (v >= 0 ? '+' : '') + v.toFixed(2);
+        g += '<div class="corr-cell" style="background:' + corrColor(v) + ';color:#fff;font-size:9px" title="' + esc(s1) + ' vs ' + esc(s2) + '">' + txt + '</div>';
       });
     });
-    rows += '</div>';
-    corrHtml = '<div class="chart-section"><h3>Sector Correlation <span style="color:#444;font-size:10px">(🟢 &gt;+0.1 · 🟡 ±0.1 · 🔴 &lt;-0.1)</span></h3>' + rows + '</div>';
+    return g + '</div>';
+  }
+
+  const hasCorr    = correlation    && correlation.sectors    && correlation.sectors.length > 1;
+  const hasEtfCorr = etf_correlation && etf_correlation.tickers && etf_correlation.tickers.length > 1;
+
+  let corrHtml = '';
+  if (!hasCorr && !hasEtfCorr) {
+    corrHtml = '<div class="chart-section"><h3>Sector &amp; ETF Correlation</h3><div class="loading-msg" style="font-size:11px">Accumulating snapshots — appears after 2+ snapshots (every 30 min)</div></div>';
   } else {
-    corrHtml = '<div class="chart-section"><h3>Sector Correlation</h3><div class="loading-msg" style="font-size:11px">Accumulating snapshots — correlation appears after 2+ data points (every 30 min)</div></div>';
+    const sectorGrid = hasCorr
+      ? '<div><h4 style="color:#555;font-size:11px;margin-bottom:4px">Sectors</h4>'
+        + buildHeatmap(correlation.sectors, correlation.matrix, s => s.length > 5 ? s.slice(0,5) : s)
+        + '</div>'
+      : '';
+    const etfGrid = hasEtfCorr
+      ? '<div><h4 style="color:#555;font-size:11px;margin-bottom:4px">ETFs (top per sector)</h4>'
+        + buildHeatmap(etf_correlation.tickers, etf_correlation.matrix, s => s)
+        + '</div>'
+      : '';
+    corrHtml = '<div class="chart-section"><h3>Correlation ' + legend + '</h3>'
+      + '<div style="display:flex;gap:24px;flex-wrap:wrap;overflow-x:auto">'
+      + sectorGrid + etfGrid
+      + '</div></div>';
   }
 
   document.getElementById('chart-body').innerHTML =
@@ -1178,7 +1195,7 @@ async function loadData() {
     renderSectors(data.sector_scores, data.news);
     renderMkt(data);
     renderWatchlist(data.etf_recs);
-    renderChart(data.sector_scores, data.etf_recs, data.correlation || {});
+    renderChart(data.sector_scores, data.etf_recs, data.correlation || {}, data.etf_correlation || {});
   } catch(e) {
     document.getElementById('status').textContent = 'Network error';
   }
@@ -1252,7 +1269,8 @@ class Handler(BaseHTTPRequestHandler):
             "mkt_loading": _state["mkt_loading"],
             "mkt_updated": _state["mkt_updated"] or "",
             "polymarket":  polymarket,
-            "correlation": compute_correlation(history) if len(history) >= 2 else {},
+            "correlation":     compute_correlation(history)     if len(history) >= 2 else {},
+            "etf_correlation": compute_etf_correlation(history) if len(history) >= 2 else {},
         }).encode("utf-8")
 
         self.send_response(200)

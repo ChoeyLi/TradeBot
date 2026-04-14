@@ -560,25 +560,42 @@ def compute_daily_averages(history):
     return {d: {s: int(sum(v) / len(v)) for s, v in sectors.items()}
             for d, sectors in sorted(buckets.items())}
 
+def _pearson(x, y):
+    n = len(x)
+    if n < 2: return 0.0
+    mx, my = sum(x)/n, sum(y)/n
+    num = sum((xi-mx)*(yi-my) for xi,yi in zip(x,y))
+    dx  = math.sqrt(sum((xi-mx)**2 for xi in x))
+    dy  = math.sqrt(sum((yi-my)**2 for yi in y))
+    return round(num/(dx*dy), 2) if dx and dy else 0.0
+
 def compute_correlations(timeline, sectors):
     """Pearson correlation matrix over a flat list of {ts, scores} snapshots."""
     n = len(timeline)
     if n < 3:
         return None
     series = {s: [h["scores"].get(s, 50) for h in timeline] for s in sectors}
-    corr   = {}
+    corr = {}
     for s1 in sectors:
         for s2 in sectors:
-            if s1 == s2:
-                corr[(s1, s2)] = 1.0
-                continue
-            x, y   = series[s1], series[s2]
-            mx, my = sum(x) / n, sum(y) / n
-            num    = sum((xi - mx) * (yi - my) for xi, yi in zip(x, y))
-            dx     = math.sqrt(sum((xi - mx) ** 2 for xi in x))
-            dy     = math.sqrt(sum((yi - my) ** 2 for yi in y))
-            corr[(s1, s2)] = (num / (dx * dy)) if dx and dy else 0.0
+            corr[(s1, s2)] = 1.0 if s1==s2 else _pearson(series[s1], series[s2])
     return corr
+
+def compute_etf_correlations(timeline):
+    """Pearson correlation for top-1 ETF per sector (scores derived from sector history)."""
+    n = len(timeline)
+    if n < 3:
+        return None, []
+    # One ETF per sector keeps the grid readable
+    etf_list = [(etfs[0][0], sector)
+                for sector, etfs in SECTOR_ETFS.items() if etfs]
+    tickers = [t for t, _ in etf_list]
+    series  = {t: [h["scores"].get(s, 50) for h in timeline] for t, s in etf_list}
+    corr = {}
+    for t1 in tickers:
+        for t2 in tickers:
+            corr[(t1, t2)] = 1.0 if t1==t2 else _pearson(series[t1], series[t2])
+    return corr, tickers
 
 # ─── DRAWING ─────────────────────────────────────────────────────────────────
 
@@ -1187,47 +1204,73 @@ def draw_chart(win, state):
 
     div3 = div2 + 3 + len(sectors) + 2
 
-    # ── [D] Sector correlation matrix ──
-    timeline = combined_timeline(state)
-    corr     = compute_correlations(timeline, sectors)
+    # ── [D] Correlation heatmaps (Sector + ETF side-by-side) ──
+    timeline          = combined_timeline(state)
+    corr              = compute_correlations(timeline, sectors)
+    etf_corr, etf_tks = compute_etf_correlations(timeline)
     if div3 < h - 3:
         win.hline(div3, 0, curses.ACS_HLINE, w)
-        div2 = div3   # reuse variable for the block below
-        if corr is None:
-            safe_addstr(win, div2 + 1, 2,
-                        "Correlation: need ≥3 snapshots — builds after ~1 h.",
+        base = div3
+
+        def _corr_attr(v, is_diag):
+            if is_diag:              return curses.color_pair(C_DIM)  | curses.A_BOLD
+            if v > 0.1:              return curses.color_pair(C_POS)  | curses.A_BOLD
+            if v < -0.1:             return curses.color_pair(C_NEG)  | curses.A_BOLD
+            return curses.color_pair(C_NEU) | curses.A_BOLD
+
+        def _draw_heatmap(matrix, labels, start_row, start_col, label_w, cell_w, title):
+            safe_addstr(win, start_row, start_col, title,
+                        curses.color_pair(C_DIM) | curses.A_BOLD)
+            hdr_row = start_row + 1
+            c = start_col + label_w
+            for lbl in labels:
+                safe_addstr(win, hdr_row, c, f"{lbl[:cell_w-1]:>{cell_w-1}}",
+                            curses.color_pair(C_DIM) | curses.A_BOLD)
+                c += cell_w
+            for ri, l1 in enumerate(labels):
+                rrow = start_row + 2 + ri
+                if rrow >= h - 1: break
+                safe_addstr(win, rrow, start_col, f"{l1[:label_w-1]:<{label_w-1}}",
+                            curses.color_pair(C_DIM))
+                c = start_col + label_w
+                for l2 in labels:
+                    r_val = matrix.get((l1, l2), 0.0)
+                    safe_addstr(win, rrow, c,
+                                f"{r_val:+.2f}",
+                                _corr_attr(r_val, l1 == l2))
+                    c += cell_w
+
+        need_msg = corr is None and etf_corr is None
+        if need_msg:
+            safe_addstr(win, base + 1, 2,
+                        "Correlation: need ≥3 snapshots — builds after ~1.5 h.",
                         curses.color_pair(C_DIM))
         else:
-            safe_addstr(win, div2 + 1, 2,
-                        "Sector Correlation  (Pearson r · green>+0.1 · yellow±0.1 · red<-0.1)",
-                        curses.color_pair(C_DIM) | curses.A_BOLD)
-            abbr    = [s[:4] for s in sectors]
-            hdr_row = div2 + 2
-            if hdr_row < h - 1:
-                col = 16
-                for a in abbr:
-                    safe_addstr(win, hdr_row, col, f"{a:>5}",
-                                curses.color_pair(C_DIM) | curses.A_BOLD)
-                    col += 5
-            for ri, s1 in enumerate(sectors):
-                rrow = div2 + 3 + ri
-                if rrow >= h - 1:
-                    break
-                safe_addstr(win, rrow, 2, f"{s1:<13}", curses.color_pair(C_DIM))
-                col = 16
-                for s2 in sectors:
-                    r_val = corr.get((s1, s2), 0.0)
-                    r_str = f"{r_val:+.2f}"
-                    if s1 == s2:
-                        attr = curses.color_pair(C_DIM) | curses.A_BOLD
-                    elif r_val > 0.1:
-                        attr = curses.color_pair(C_POS) | curses.A_BOLD
-                    elif r_val < -0.1:
-                        attr = curses.color_pair(C_NEG) | curses.A_BOLD
-                    else:
-                        attr = curses.color_pair(C_NEU) | curses.A_BOLD
-                    safe_addstr(win, rrow, col, f"{r_str:>5}", attr)
-                    col += 5
+            legend = "Pearson r · green>+0.1 · yellow±0.1 · red<-0.1"
+            safe_addstr(win, base + 1, 2, legend, curses.color_pair(C_DIM))
+
+            # Sector heatmap on the left
+            if corr is not None:
+                _draw_heatmap(corr, sectors,
+                              start_row=base + 2, start_col=2,
+                              label_w=10, cell_w=6,
+                              title="Sectors")
+
+            # ETF heatmap to the right (offset past sector block)
+            etf_start_col = 2 + 10 + len(sectors) * 6 + 4  # label + cols + gap
+            if etf_corr is not None and etf_start_col + 10 + len(etf_tks)*6 < w:
+                _draw_heatmap(etf_corr, etf_tks,
+                              start_row=base + 2, start_col=etf_start_col,
+                              label_w=6, cell_w=6,
+                              title="ETFs (top per sector)")
+            elif etf_corr is not None:
+                # fallback: stack below sector heatmap
+                etf_base = base + 3 + len(sectors) + 1
+                win.hline(etf_base, 0, curses.ACS_HLINE, w)
+                _draw_heatmap(etf_corr, etf_tks,
+                              start_row=etf_base + 1, start_col=2,
+                              label_w=6, cell_w=6,
+                              title="ETF Correlation (top per sector)")
 
 # ─── MAIN LOOP ────────────────────────────────────────────────────────────────
 
