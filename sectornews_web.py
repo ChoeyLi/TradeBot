@@ -713,11 +713,11 @@ body {
       <div id="news-list-col">
         <table id="news-table">
           <thead><tr>
-            <th class="col-age" onclick="sortNews('age')" style="cursor:pointer" title="Sort by age">Age ⇅</th>
-            <th class="col-src" onclick="filterNews('source')" style="cursor:pointer" title="Click row to filter by source">Source ⇅</th>
-            <th onclick="sortNews('signal')" style="cursor:pointer" title="Sort by signal">Signal ⇅</th>
-            <th class="col-sect" onclick="filterNews('sector')" style="cursor:pointer" title="Click row to filter by sector">Sector ⇅</th>
-            <th class="col-theme" onclick="filterNews('theme')" style="cursor:pointer" title="Click row to filter by theme">Theme ⇅</th>
+            <th class="col-age" onclick="sortNews('age')" style="cursor:pointer" title="Sort by age">Age</th>
+            <th class="col-src" onclick="sortNews('source')" style="cursor:pointer" title="Sort by source — click a cell to filter">Source</th>
+            <th onclick="sortNews('signal')" style="cursor:pointer" title="Sort by signal — click a cell to filter">Signal</th>
+            <th class="col-sect" onclick="sortNews('sector')" style="cursor:pointer" title="Sort by sector — click a cell to filter">Sector</th>
+            <th class="col-theme" onclick="sortNews('theme')" style="cursor:pointer" title="Sort by theme — click a cell to filter">Theme</th>
             <th>Headline</th>
           </tr></thead>
           <tbody id="news-body">
@@ -1223,6 +1223,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+        self.send_header("Pragma", "no-cache")
         self.end_headers()
         self.wfile.write(body)
 
